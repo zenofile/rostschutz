@@ -1,0 +1,51 @@
+cargo-features = ["profile-rustflags"]
+
+[package]
+name = "nft-void"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ipnet = "2"
+minijinja = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "0.0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-journald = "0.3"
+regex = "1"
+thiserror = "2"
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+kanal = { version = "0.1", default-features = false }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+overflow-checks = false
+strip = "symbols"
+lto = "thin"
+panic = "abort"
+codegen-units = 1
+opt-level = 3
+rustflags = ["-C", "target-cpu=native"]
+
+[lints]
+
+[lints.rust]
+missing_copy_implementations = "warn"
+missing_debug_implementations = "allow"
+missing_docs = "allow"
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+cargo = { level = "warn", priority = 0 }
+nursery = { level = "warn", priority = 0 }
+pedantic = { level = "warn", priority = 0 }
+items_after_statements = { level = "allow", priority = 1 }
+multiple_crate_versions = { level = "allow", priority = 1 }
+uninlined_format_args = { level = "allow", priority = 1 }
+cargo_common_metadata = { level = "allow", priority = 1 }

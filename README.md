@@ -1,0 +1,69 @@
+# nft-void
+
+A high-performance utility for managing nftables-based IP blocklists with support for country-based filtering and abuse list integration.
+
+## Features
+
+- **Multi-source IP blocking**: Whitelist, blacklist, abuse lists, and country-based filtering
+- **Dual-stack support**: IPv4 and IPv6 with independent configuration
+- **Concurrent downloads**: Multi-threaded fetching of remote IP lists
+- **Template-based rules**: Jinja2 templating for flexible nftables rule generation
+- **Systemd integration**: Includes service and timer units for automated updates
+
+
+## Requirements
+
+- Linux kernel with nftables support
+- Rust 2024 edition or later
+- libssl >= 3
+
+## Installation
+
+```cli
+cargo build --release
+cp target/release/nft-void /usr/local/bin/
+mkdir -p /usr/local/etc/nft-void/
+cp config.yaml template.jinja2 /usr/local/etc/nft-void/
+cp -r nft-void-.service.d /etc/systemd/system/
+cp nft-void-main.service nft-void-refresh.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+```
+
+
+## Configuration
+
+Edit `config.yaml` to configure IP versions, block policies, whitelists, blacklists, abuselists, and ISO 3166-1 alpha-2 country codes
+
+## Usage
+
+```log
+Usage: nft-void [OPTIONS] --config <CONFIG> --template <TEMPLATE> <COMMAND>
+
+Commands:
+  start    Start nft-void and create firewall rules
+  stop     Stop nft-void and remove firewall rules
+  restart  Restart nft-void (stop then start)
+  refresh  Update lists
+  config   Display current configuration
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>      Path to configuration file
+  -t, --template <TEMPLATE>  Path to template file
+  -v, --verbose...           Increase verbosity level (-v, -vv, -vvv, etc.)
+  -w, --threads <THREADS>    Number of worker threads [default: 4]
+      --timeout <TIMEOUT>    Timeout for requests in seconds [default: 10]
+  -n, --dry-run              Perform a dry-run without making actual changes
+  -h, --help                 Print help
+```
+
+## Systemd Services
+
+Enable automatic updates with the included systemd units:
+
+```cli
+systemctl enable --now nft-void-main.service
+systemctl enable --now nft-void-refresh.timer
+```
+
+The timer refreshes abuse and country lists at configured intervals.
