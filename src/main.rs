@@ -883,13 +883,12 @@ fn main() -> Result<()> {
 
     let mut config = Config::load(&cli.config)?;
 
-    if config.iifname.is_none() {
+    if let Some(ref iifname) = config.iifname {
+        info!("Using network interface: {}", iifname);
+    } else {
         config.iifname = Some("eth0".to_owned());
+        warn!("Using fallback interface eth0");
     }
-    info!(
-        "Using network interface: {}",
-        config.iifname.as_ref().unwrap()
-    );
 
     let print_stdout = match &cli.action {
         Action::Start { print_stdout } | Action::Refresh { print_stdout } => *print_stdout,
