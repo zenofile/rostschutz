@@ -26,27 +26,35 @@ ASN_URLS:
 # Whitelist: IP or Network adresses
 WHITELIST:
   v4:
-    - '127.0.0.1'
-    - '192.168.0.1/24'
+    - 127.0.0.1
+    - 10.0.0.0/8
+    - 169.254.0.0/16
+    - 192.168.0.0/16
+    - 100.64.0.0/10
   v6:
-    - '2a02:8060::/31'
+    - fc00::/7
+    - fd00::/8
+    - fe80::/10
 
 BLACKLIST:
   v4:
-    - '1.1.1.1/32'
+    - 1.1.1.1
+    - 8.8.8.8
+    - 9.9.9.9
   v6:
-    - '2b02:8060::/64'
 
 # URLs to direct IP or CIDR notation or AS<digits>
 # For example, with: https://iplists.firehol.org/
 ABUSELIST:
   v4:
-    - AS10014
+    - AS37963 #ALIBABA-CN-NET
+    - AS45102 #ALIBABA-CN-NET
     - https://iplists.firehol.org/files/bi_any_0_1d.ipset
     - https://iplists.firehol.org/files/haley_ssh.ipset
     - https://iplists.firehol.org/files/firehol_level2.netset
   v6:
-    - AS1001
+    - AS37963 #ALIBABA-CN-NET
+    - AS45102 #ALIBABA-CN-NET
 
 # Country list: two letter country codes defined in ISO 3166-1
 # https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2#Officially_assigned_code_elements
