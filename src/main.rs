@@ -101,6 +101,9 @@ struct Config {
 
     #[serde(rename = "COUNTRY_LIST")]
     country_list: Option<Vec<String>>,
+
+    #[serde(rename = "ASN_URLS")]
+    asn_urls: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug)]
@@ -400,7 +403,7 @@ fn download_files_aggregated(
         return Vec::new();
     }
 
-    let (result_sender, result_receiver) = unbounded::<DownloadResult>();
+    let (result_sender, result_receiver) = unbounded();
 
     let num_jobs = urls.len();
     for url in urls {
@@ -438,22 +441,63 @@ fn download_files_aggregated(
 fn get_abuselist(
     pool: &ThreadPool<DownloadJob, DownloadResult>,
     abuselist: &[String],
+    ipversion: &str,
+    asn_url_template: Option<&str>,
 ) -> Vec<String> {
     let mut urls = Vec::new();
-    let mut direct = Vec::new();
+    let mut asn_urls = Vec::new();
 
     for entry in abuselist {
-        if entry.starts_with("http://") || entry.starts_with("https://") {
-            urls.push(entry.clone());
+        let trimmed = entry.trim();
+
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            urls.push(trimmed.to_owned());
+        } else if trimmed.to_uppercase().starts_with("AS") {
+            let digits = &trimmed[2..];
+
+            if digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
+                info!("Processing ASN entry: AS{} for {}", digits, ipversion);
+
+                let asn_url = if let Some(template) = asn_url_template {
+                    template.replace("{asn}", digits)
+                } else {
+                    // Fallback to hardcoded URLs if template not configured
+                    match ipversion {
+                        "v4" => format!(
+                            "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{}/ipv4-aggregated.txt",
+                            digits
+                        ),
+                        "v6" => format!(
+                            "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{}/ipv6-aggregated.txt",
+                            digits
+                        ),
+                        _ => {
+                            warn!("Unknown IP version: {}", ipversion);
+                            continue;
+                        }
+                    }
+                };
+
+                asn_urls.push(asn_url);
+            } else {
+                warn!(
+                    "Invalid ASN format (must be AS followed by digits): {}",
+                    trimmed
+                );
+            }
         } else {
-            // Non-list entries, i.e. raw IPs
-            direct.push(entry.clone());
+            warn!(
+                "Ignoring entry with unknown format in abuselist: {}",
+                trimmed
+            );
         }
     }
 
-    let mut fetched = download_files_aggregated(pool, urls);
-    direct.append(&mut fetched);
-    direct
+    // Download all URLs (regular URLs and ASN-generated URLs)
+    let mut all_urls = urls;
+    all_urls.extend(asn_urls);
+
+    download_files_aggregated(pool, all_urls)
 }
 
 fn get_country_ip_list(
@@ -608,7 +652,12 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
         if let Some(abuselist) = &config.abuselist
             && let Some(urls) = abuselist.get(ip_version)
         {
-            let ip_list = get_abuselist(&pool, urls);
+            let asn_template = config
+                .asn_urls
+                .as_ref()
+                .and_then(|templates| templates.get(ip_version))
+                .map(String::as_str);
+            let ip_list = get_abuselist(&pool, urls, ip_version, asn_template);
             info!(
                 "Processed abuselist for {}: {} entries",
                 ip_version,
