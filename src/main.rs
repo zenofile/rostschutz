@@ -3,21 +3,16 @@ mod threadpool;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
-use kanal::unbounded;
-use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
-use std::fmt::Write as _;
-use std::fs;
-use std::io::Write;
-use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::str::FromStr;
-use std::time::Duration;
+use std::{
+    collections::{BTreeSet, HashMap},
+    fs,
+    io::Write,
+    path::PathBuf,
+    process::{Command, Output},
+};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::prelude::*;
-use ureq::Agent;
 
 use crate::threadpool::ThreadPool;
 
@@ -240,7 +235,7 @@ impl IpSets {
                 continue;
             }
 
-            match Ipv4Net::from_str(cleaned) {
+            match <Ipv4Net as std::str::FromStr>::from_str(cleaned) {
                 Ok(net) => {
                     parsed_ips.insert(net);
                 }
@@ -282,7 +277,7 @@ impl IpSets {
                 continue;
             }
 
-            match Ipv6Net::from_str(cleaned) {
+            match <Ipv6Net as std::str::FromStr>::from_str(cleaned) {
                 Ok(net) => {
                     parsed_ips.insert(net);
                 }
@@ -349,8 +344,8 @@ impl ThreadPool<DownloadJob, DownloadResult> {
     fn downloader(size: usize, timeout: u64) -> Self {
         use ureq::tls::{TlsConfig, TlsProvider};
 
-        let config = Agent::config_builder()
-            .timeout_global(Duration::from_secs(timeout).into())
+        let config = ureq::Agent::config_builder()
+            .timeout_global(std::time::Duration::from_secs(timeout).into())
             .user_agent("Mozilla/5.0 (compatible; nft-void/0.1.0)")
             .tls_config(
                 TlsConfig::builder()
@@ -368,7 +363,7 @@ impl ThreadPool<DownloadJob, DownloadResult> {
     }
 }
 
-fn download_list_trimmed(client: &Agent, job: DownloadJob) -> DownloadResult {
+fn download_list_trimmed(client: &ureq::Agent, job: DownloadJob) -> DownloadResult {
     let content = (|| -> Result<Vec<String>> {
         let mut response = client
             .get(&*job.url)
@@ -402,6 +397,8 @@ fn download_files_aggregated(
     pool: &ThreadPool<DownloadJob, DownloadResult>,
     urls: Vec<String>,
 ) -> Vec<String> {
+    use kanal::unbounded;
+
     if urls.is_empty() {
         return Vec::new();
     }
@@ -524,7 +521,7 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     let template_content =
         fs::read_to_string(&context.template).context("Failed to read template file")?;
 
-    let mut env = Environment::new();
+    let mut env = minijinja::Environment::new();
     env.add_template("nft-void", &template_content)?;
     let template = env.get_template("nft-void")?;
 
@@ -594,6 +591,7 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     }
 
     // Render template with all context
+    use minijinja::context;
     let rules = template.render(context! {
         iifname => config.iifname.as_deref().unwrap(),
         default_policy => &config.default_policy,
@@ -710,7 +708,8 @@ fn get_default_interface() -> Option<String> {
 fn run_nft_cli(args: &[&str], dry_run: bool) -> Result<Output> {
     if dry_run {
         debug!("Mocking nft command: nft {}", args.join(" "));
-        let mock_status = std::process::ExitStatus::from_raw(0);
+        let mock_status =
+            <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(0);
         return Ok(Output {
             status: mock_status,
             stdout: Vec::new(),
@@ -731,9 +730,12 @@ fn run_nft_cli(args: &[&str], dry_run: bool) -> Result<Output> {
 }
 
 fn run_nft_stdin(rules: &str, dry_run: bool) -> Result<Output> {
+    use std::process::Stdio;
+
     if dry_run {
         debug!("Mocking nft command: nft -f -");
-        let mock_status = std::process::ExitStatus::from_raw(0);
+        let mock_status =
+            <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(0);
         return Ok(Output {
             status: mock_status,
             stdout: Vec::new(),
@@ -745,9 +747,9 @@ fn run_nft_stdin(rules: &str, dry_run: bool) -> Result<Output> {
     let mut child = Command::new("nft")
         .arg("-f")
         .arg("-")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .context("Failed to spawn nft command")?;
 
@@ -813,6 +815,8 @@ fn stop() -> Result<()> {
 }
 
 fn refresh(context: &AppContext) -> Result<()> {
+    use std::fmt::Write as _;
+
     info!("Reloading abuselist and country lists");
 
     let mut flush_commands = String::with_capacity(512);
