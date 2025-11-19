@@ -346,7 +346,7 @@ struct DownloadResult {
 
 // Convenience constructor for downloads
 impl ThreadPool<DownloadJob, DownloadResult> {
-    fn for_downloads(size: usize, timeout: u64) -> Self {
+    fn downloader(size: usize, timeout: u64) -> Self {
         use ureq::tls::{TlsConfig, TlsProvider};
 
         let config = Agent::config_builder()
@@ -361,7 +361,10 @@ impl ThreadPool<DownloadJob, DownloadResult> {
 
         let agent = ureq::Agent::new_with_config(config);
 
-        Self::new(size, move |job| download_list_trimmed(&agent, job))
+        Self::new(
+            size.try_into().expect("Pool size must be > 0"),
+            move |job| download_list_trimmed(&agent, job),
+        )
     }
 }
 
@@ -609,7 +612,7 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
 fn collect_ip_sets(context: &AppContext) -> IpSets {
     let config = &context.config;
     let mut sets = IpSets::new();
-    let pool = ThreadPool::for_downloads(context.threads, context.timeout);
+    let pool = ThreadPool::downloader(context.threads, context.timeout);
 
     for ip_version in config.ip_versions.get_active() {
         info!("Collecting IP sets for {}", ip_version);

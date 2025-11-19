@@ -1,13 +1,11 @@
-// src/threadpool.rs
 use anyhow::Result;
 use kanal::{Sender, bounded};
 use std::thread;
 use tracing::debug;
 
-type SendType<J, R> = Sender<Option<(J, Sender<R>)>>;
 pub struct ThreadPool<J, R> {
     workers: Vec<thread::JoinHandle<()>>,
-    sender: Option<SendType<J, R>>,
+    sender: Option<Sender<(J, Sender<R>)>>,
 }
 
 impl<J, R> ThreadPool<J, R>
@@ -17,25 +15,29 @@ where
 {
     /// Create a new `ThreadPool` with the specified number of workers
     /// and a worker function that processes jobs
-    pub fn new<F>(size: usize, worker_fn: F) -> Self
+    pub fn new<F>(size: std::num::NonZeroUsize, worker_fn: F) -> Self
     where
         F: Fn(J) -> R + Send + Sync + Clone + 'static,
     {
-        let (sender, receiver) = bounded::<Option<(J, Sender<R>)>>(size * 2);
-        let mut workers = Vec::with_capacity(size);
+        let num = size.get();
+        let (sender, receiver) = bounded::<(J, Sender<R>)>(num * 2);
+        let mut workers = Vec::with_capacity(num);
 
-        for id in 0..size {
+        for id in 0..num {
             let receiver = receiver.clone();
             let worker_fn = worker_fn.clone();
 
-            let worker = thread::spawn(move || {
-                debug!("Worker {} started", id);
-                while let Ok(Some((job, result_sender))) = receiver.recv() {
-                    let result = worker_fn(job);
-                    let _ = result_sender.send(result);
-                }
-                debug!("Worker {} shutting down", id);
-            });
+            let worker = thread::Builder::new()
+                .name(format!("worker-{}", id))
+                .spawn(move || {
+                    debug!("Worker {} started", id);
+                    while let Ok((job, result_sender)) = receiver.recv() {
+                        let result = worker_fn(job);
+                        let _ = result_sender.send(result);
+                    }
+                    debug!("Worker {} shutting down", id);
+                })
+                .expect("Failed to spawn worker thread");
             workers.push(worker);
         }
 
@@ -50,7 +52,7 @@ where
         self.sender
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ThreadPool has been shut down"))?
-            .send(Some((job, result_sender)))
+            .send((job, result_sender))
             .map_err(|e| anyhow::anyhow!("Failed to send job to worker thread: {}", e))
     }
 }
