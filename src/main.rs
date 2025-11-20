@@ -86,19 +86,19 @@ struct Config {
     iifname: Option<String>,
 
     #[serde(rename = "WHITELIST")]
-    whitelist: Option<HashMap<String, Vec<String>>>,
+    whitelist: Option<HashMap<IpVersion, Vec<String>>>,
 
     #[serde(rename = "BLACKLIST")]
-    blacklist: Option<HashMap<String, Vec<String>>>,
+    blacklist: Option<HashMap<IpVersion, Vec<String>>>,
 
     #[serde(rename = "ABUSELIST")]
-    abuselist: Option<HashMap<String, Vec<String>>>,
+    abuselist: Option<HashMap<IpVersion, Vec<String>>>,
 
     #[serde(rename = "COUNTRY_LIST")]
     country_list: Option<Vec<String>>,
 
     #[serde(rename = "ASN_URLS")]
-    asn_urls: Option<HashMap<String, String>>,
+    asn_urls: Option<HashMap<IpVersion, String>>,
 }
 
 #[derive(Debug)]
@@ -138,6 +138,30 @@ fn default_drop() -> String {
     String::from("drop")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum IpVersion {
+    #[serde(rename = "v4")]
+    V4,
+    #[serde(rename = "v6")]
+    V6,
+}
+
+impl IpVersion {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::V4 => "v4",
+            Self::V6 => "v6",
+        }
+    }
+}
+
+impl std::fmt::Display for IpVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct IpVersions {
     v4: bool,
@@ -145,9 +169,9 @@ struct IpVersions {
 }
 
 impl IpVersions {
-    fn get_active(&self) -> impl Iterator<Item = &'static str> {
-        let v4 = self.v4.then_some("v4");
-        let v6 = self.v6.then_some("v6");
+    fn get_active(&self) -> impl Iterator<Item = IpVersion> {
+        let v4 = self.v4.then_some(IpVersion::V4);
+        let v6 = self.v6.then_some(IpVersion::V6);
         v4.into_iter().chain(v6)
     }
 }
@@ -441,7 +465,7 @@ fn download_files_aggregated(
 fn get_abuselist(
     pool: &ThreadPool<DownloadJob, DownloadResult>,
     abuselist: &[String],
-    ipversion: &str,
+    ip_version: IpVersion,
     asn_url_template: Option<&str>,
 ) -> Vec<String> {
     let mut urls = Vec::new();
@@ -456,27 +480,18 @@ fn get_abuselist(
             let digits = &trimmed[2..];
 
             if digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
-                info!("Processing ASN entry: AS{} for {}", digits, ipversion);
+                info!("Processing ASN entry: AS{} for {}", digits, ip_version);
 
-                let asn_url = if let Some(template) = asn_url_template {
-                    template.replace("{asn}", digits)
-                } else {
-                    // Fallback to hardcoded URLs if template not configured
-                    match ipversion {
-                        "v4" => format!(
+                let asn_url = asn_url_template.map_or_else(|| match ip_version {
+                        IpVersion::V4 => format!(
                             "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{}/ipv4-aggregated.txt",
                             digits
                         ),
-                        "v6" => format!(
+                        IpVersion::V6 => format!(
                             "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{}/ipv6-aggregated.txt",
                             digits
                         ),
-                        _ => {
-                            warn!("Unknown IP version: {}", ipversion);
-                            continue;
-                        }
-                    }
-                };
+                    }, |template| template.replace("{asn}", digits));
 
                 asn_urls.push(asn_url);
             } else {
@@ -503,7 +518,7 @@ fn get_abuselist(
 fn get_country_ip_list(
     pool: &ThreadPool<DownloadJob, DownloadResult>,
     country_list: &[String],
-    ip_version: &str,
+    ip_version: IpVersion,
 ) -> Vec<String> {
     let urls: Vec<String> = country_list.iter().map(|country| {
         info!("Getting blocklist for country: {}", country);
@@ -550,7 +565,7 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
         );
 
         match ip_version {
-            "v4" => {
+            IpVersion::V4 => {
                 set_data.insert(
                     whitelist_key,
                     sets.get_v4_formatted(&whitelist_set).unwrap_or_default(),
@@ -568,7 +583,7 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
                     sets.get_v4_formatted(&country_set).unwrap_or_default(),
                 );
             }
-            "v6" => {
+            IpVersion::V6 => {
                 set_data.insert(
                     whitelist_key,
                     sets.get_v6_formatted(&whitelist_set).unwrap_or_default(),
@@ -586,7 +601,6 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
                     sets.get_v6_formatted(&country_set).unwrap_or_default(),
                 );
             }
-            _ => unreachable!(),
         }
     }
 
@@ -617,7 +631,7 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
 
         // Process whitelist
         if let Some(whitelist) = &config.whitelist
-            && let Some(ips) = whitelist.get(ip_version)
+            && let Some(ips) = whitelist.get(&ip_version)
         {
             info!(
                 "Processing whitelist for {}: {} entries",
@@ -626,15 +640,14 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
             );
             let set_name = format!("{}_{}", config.set_names.whitelist, ip_version);
             match ip_version {
-                "v4" => sets.insert_v4(set_name, ips.clone()),
-                "v6" => sets.insert_v6(set_name, ips.clone()),
-                _ => unreachable!(),
+                IpVersion::V4 => sets.insert_v4(set_name, ips.clone()),
+                IpVersion::V6 => sets.insert_v6(set_name, ips.clone()),
             }
         }
 
         // Process blacklist
         if let Some(blacklist) = &config.blacklist
-            && let Some(ips) = blacklist.get(ip_version)
+            && let Some(ips) = blacklist.get(&ip_version)
         {
             info!(
                 "Processing blacklist for {}: {} entries",
@@ -643,20 +656,19 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
             );
             let set_name = format!("{}_{}", config.set_names.blacklist, ip_version);
             match ip_version {
-                "v4" => sets.insert_v4(set_name, ips.clone()),
-                "v6" => sets.insert_v6(set_name, ips.clone()),
-                _ => unreachable!(),
+                IpVersion::V4 => sets.insert_v4(set_name, ips.clone()),
+                IpVersion::V6 => sets.insert_v6(set_name, ips.clone()),
             }
         }
 
         // Process abuselist
         if let Some(abuselist) = &config.abuselist
-            && let Some(urls) = abuselist.get(ip_version)
+            && let Some(urls) = abuselist.get(&ip_version)
         {
             let asn_template = config
                 .asn_urls
                 .as_ref()
-                .and_then(|templates| templates.get(ip_version))
+                .and_then(|templates| templates.get(&ip_version))
                 .map(String::as_str);
             let ip_list = get_abuselist(&pool, urls, ip_version, asn_template);
             info!(
@@ -666,9 +678,8 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
             );
             let set_name = format!("{}_{}", config.set_names.abuselist, ip_version);
             match ip_version {
-                "v4" => sets.insert_v4(set_name, ip_list),
-                "v6" => sets.insert_v6(set_name, ip_list),
-                _ => unreachable!(),
+                IpVersion::V4 => sets.insert_v4(set_name, ip_list),
+                IpVersion::V6 => sets.insert_v6(set_name, ip_list),
             }
         }
 
@@ -684,9 +695,8 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
             );
             let set_name = format!("{}_{}", config.set_names.country, ip_version);
             match ip_version {
-                "v4" => sets.insert_v4(set_name, ip_list),
-                "v6" => sets.insert_v6(set_name, ip_list),
-                _ => unreachable!(),
+                IpVersion::V4 => sets.insert_v4(set_name, ip_list),
+                IpVersion::V6 => sets.insert_v6(set_name, ip_list),
             }
         }
     }
@@ -849,9 +859,8 @@ fn refresh(context: &AppContext) -> Result<()> {
         let country_set = format!("{}_{}", config.set_names.country, ip_version);
 
         let abuselist_elements = match ip_version {
-            "v4" => sets.get_v4_formatted(&abuselist_set),
-            "v6" => sets.get_v6_formatted(&abuselist_set),
-            _ => unreachable!(),
+            IpVersion::V4 => sets.get_v4_formatted(&abuselist_set),
+            IpVersion::V6 => sets.get_v6_formatted(&abuselist_set),
         };
 
         if let Some(elements) = abuselist_elements
@@ -865,9 +874,8 @@ fn refresh(context: &AppContext) -> Result<()> {
         }
 
         let country_elements = match ip_version {
-            "v4" => sets.get_v4_formatted(&country_set),
-            "v6" => sets.get_v6_formatted(&country_set),
-            _ => unreachable!(),
+            IpVersion::V4 => sets.get_v4_formatted(&country_set),
+            IpVersion::V6 => sets.get_v6_formatted(&country_set),
         };
 
         if let Some(elements) = country_elements
