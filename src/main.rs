@@ -10,6 +10,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Output},
+    sync::Arc,
 };
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::prelude::*;
@@ -187,6 +188,7 @@ impl std::fmt::Display for IpVersions {
                 for version in iter {
                     write!(f, ", {}", version)?;
                 }
+
                 Ok(())
             }
         }
@@ -225,6 +227,7 @@ impl std::fmt::Display for Config {
         writeln!(f, "BLACKLIST: {:?}", self.blacklist)?;
         writeln!(f, "ABUSELIST: {:?}", self.abuselist)?;
         writeln!(f, "COUNTRY_LIST: {:?}", self.country_list)?;
+
         Ok(())
     }
 }
@@ -249,106 +252,90 @@ impl IpSets {
         result.trim()
     }
 
-    fn insert_v4(&mut self, set_name: String, ips: Vec<String>) {
-        let mut parsed_ips = BTreeSet::new();
-        let mut invalid_count = 0;
+    #[inline]
+    fn log_results(set_name: &str, url: &str, added: usize, invalid: usize) {
+        if invalid > 0 {
+            warn!(
+                "Skipped {} invalid entries in {} for {}",
+                invalid, set_name, url
+            );
+        }
+        debug!("Set {}: Added {} new entries from {}", set_name, added, url);
+    }
 
-        for ip_str in ips {
-            let cleaned = Self::strip_comment_and_trim(&ip_str);
+    fn process_ips<T, F>(
+        target_map: &mut HashMap<String, BTreeSet<T>>,
+        set_name: &str,
+        data: (&str, &str),
+        parser: F,
+    ) where
+        T: Ord + Copy + std::fmt::Debug,
+        F: Fn(&str) -> Option<T>,
+    {
+        let (url, content) = data;
+        let mut added = 0;
+        let mut invalid = 0;
+
+        let target_set = target_map.entry(set_name.to_owned()).or_default();
+
+        for line in content.lines() {
+            let cleaned = Self::strip_comment_and_trim(line);
             if cleaned.is_empty() {
                 continue;
             }
 
-            match <Ipv4Net as std::str::FromStr>::from_str(cleaned) {
-                Ok(net) => {
-                    parsed_ips.insert(net);
+            if let Some(net) = parser(cleaned) {
+                if target_set.insert(net) {
+                    added += 1;
                 }
-                Err(_) => {
-                    if let Ok(addr) = cleaned.parse::<std::net::Ipv4Addr>() {
-                        parsed_ips.insert(Ipv4Net::new(addr, 32).unwrap());
-                    } else {
-                        invalid_count += 1;
-                        debug!("Invalid IPv4 address/network: {}", cleaned);
-                    }
-                }
+            } else {
+                invalid += 1;
+                debug!("Invalid IP entry: {}", cleaned);
             }
         }
 
-        if invalid_count > 0 {
-            warn!(
-                "Skipped {} invalid IPv4 entries for set {}",
-                invalid_count, set_name
-            );
-        }
-
-        info!(
-            "Set {}: {} unique IPv4 networks (deduplicated from {} entries)",
-            set_name,
-            parsed_ips.len(),
-            parsed_ips.len() + invalid_count
-        );
-
-        self.v4_sets.insert(set_name, parsed_ips);
+        Self::log_results(set_name, url, added, invalid);
     }
 
-    fn insert_v6(&mut self, set_name: String, ips: Vec<String>) {
-        let mut parsed_ips = BTreeSet::new();
-        let mut invalid_count = 0;
-
-        for ip_str in ips {
-            let cleaned = Self::strip_comment_and_trim(&ip_str);
-            if cleaned.is_empty() {
-                continue;
-            }
-
-            match <Ipv6Net as std::str::FromStr>::from_str(cleaned) {
-                Ok(net) => {
-                    parsed_ips.insert(net);
-                }
-                Err(_) => {
-                    if let Ok(addr) = cleaned.parse::<std::net::Ipv6Addr>() {
-                        parsed_ips.insert(Ipv6Net::new(addr, 128).unwrap());
-                    } else {
-                        invalid_count += 1;
-                        debug!("Invalid IPv6 address/network: {}", cleaned);
-                    }
-                }
-            }
+    fn process_content(&mut self, version: IpVersion, set_name: &str, data: (&str, &str)) {
+        match version {
+            IpVersion::V4 => Self::process_ips(&mut self.v4_sets, set_name, data, |s| {
+                s.parse::<Ipv4Net>().ok().or_else(|| {
+                    s.parse::<std::net::Ipv4Addr>()
+                        .ok()
+                        .map(|a| Ipv4Net::new(a, 32).unwrap())
+                })
+            }),
+            IpVersion::V6 => Self::process_ips(&mut self.v6_sets, set_name, data, |s| {
+                s.parse::<Ipv6Net>().ok().or_else(|| {
+                    s.parse::<std::net::Ipv6Addr>()
+                        .ok()
+                        .map(|a| Ipv6Net::new(a, 128).unwrap())
+                })
+            }),
         }
-
-        if invalid_count > 0 {
-            warn!(
-                "Skipped {} invalid IPv6 entries for set {}",
-                invalid_count, set_name
-            );
-        }
-
-        info!(
-            "Set {}: {} unique IPv6 networks (deduplicated from {} entries)",
-            set_name,
-            parsed_ips.len(),
-            parsed_ips.len() + invalid_count
-        );
-
-        self.v6_sets.insert(set_name, parsed_ips);
     }
 
-    fn get_v4_formatted(&self, set_name: &str) -> Option<String> {
-        self.v4_sets.get(set_name).map(|nets| {
+    fn get_formatted_generic<T>(
+        map: &HashMap<String, BTreeSet<T>>,
+        set_name: &str,
+    ) -> Option<String>
+    where
+        T: std::fmt::Display,
+    {
+        map.get(set_name).map(|nets| {
             nets.iter()
                 .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",\n                ")
+                .collect::<Vec<String>>()
+                .join(",\n        ")
         })
     }
 
-    fn get_v6_formatted(&self, set_name: &str) -> Option<String> {
-        self.v6_sets.get(set_name).map(|nets| {
-            nets.iter()
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",\n                ")
-        })
+    fn get_formatted(&self, version: IpVersion, set_name: &str) -> Option<String> {
+        match version {
+            IpVersion::V4 => Self::get_formatted_generic(&self.v4_sets, set_name),
+            IpVersion::V6 => Self::get_formatted_generic(&self.v6_sets, set_name),
+        }
     }
 }
 
@@ -421,66 +408,36 @@ fn download_url(timeout: u64, job: DownloadJob) -> DownloadResult {
     }
 }
 
-fn download_files_aggregated(
-    pool: &ThreadPool<DownloadJob, DownloadResult>,
+// Returns a Receiver that yields results as they finish
+fn start_downloads(
+    pool: Arc<ThreadPool<DownloadJob, DownloadResult>>,
     urls: Vec<String>,
-) -> Vec<String> {
-    use kanal::unbounded;
+) -> kanal::Receiver<DownloadResult> {
+    let (tx, rx) = kanal::bounded(pool.workers.len() * 2);
 
-    if urls.is_empty() {
-        return Vec::new();
-    }
-
-    let (result_sender, result_receiver) = unbounded();
-
-    let num_jobs = urls.len();
-    for url in urls {
-        let job = DownloadJob { url };
-        if let Err(e) = pool.execute(job, result_sender.clone()) {
-            error!("Failed to queue download job: {}", e);
-        }
-    }
-
-    drop(result_sender);
-
-    let mut aggregated = Vec::with_capacity(4096);
-    let mut received = 0;
-    while received < num_jobs {
-        if let Ok(result) = result_receiver.recv() {
-            received += 1;
-            match result.content {
-                Ok(text) => {
-                    let lines = text.lines().map(str::trim).filter(|s| !s.is_empty());
-
-                    let start_len = aggregated.len();
-                    aggregated.extend(lines.map(String::from));
-
-                    info!(
-                        "Downloaded {} lines from {}",
-                        aggregated.len() - start_len,
-                        result.url
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to download {}: {}", result.url, e);
-                }
+    // Job producer
+    std::thread::spawn(move || {
+        for url in urls {
+            // This blocks if workers are full, acting as natural backpressure
+            if pool.execute(DownloadJob { url }, tx.clone()).is_err() {
+                break;
             }
         }
-    }
+        // tx is dropped here, closing the channel when done
+    });
 
-    aggregated
+    rx
 }
 
-fn get_abuselist(
-    pool: &ThreadPool<DownloadJob, DownloadResult>,
-    abuselist: &[String],
+fn generate_abuselist_urls(
+    entries: &[String],
     ip_version: IpVersion,
     asn_url_template: Option<&str>,
 ) -> Vec<String> {
     let mut urls = Vec::new();
     let mut asn_urls = Vec::new();
 
-    for entry in abuselist {
+    for entry in entries {
         let trimmed = entry.trim();
 
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -521,24 +478,17 @@ fn get_abuselist(
     let mut all_urls = urls;
     all_urls.extend(asn_urls);
 
-    download_files_aggregated(pool, all_urls)
+    all_urls
 }
 
-fn get_country_ip_list(
-    pool: &ThreadPool<DownloadJob, DownloadResult>,
-    country_list: &[String],
-    ip_version: IpVersion,
-) -> Vec<String> {
-    let urls: Vec<String> = country_list.iter().map(|country| {
-        info!("Getting blocklist for country: {}", country);
+fn generate_country_urls(countries: &[String], ip_version: IpVersion) -> Vec<String> {
+    countries.iter().map(|country| {
         format!(
             "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ip{}/{}.cidr",
             ip_version,
             country.to_lowercase()
         )
-    }).collect();
-
-    download_files_aggregated(pool, urls)
+    }).collect()
 }
 
 fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
@@ -549,81 +499,41 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     env.add_template("nft-void", &template_content)?;
     let template = env.get_template("nft-void")?;
 
-    let mut set_data = HashMap::new();
+    let mut set_data = HashMap::with_capacity(8);
+    let cfg = &context.config;
 
-    let config = &context.config;
-    for ip_version in config.ip_versions.get_active() {
-        let (
-            whitelist_key,
-            blacklist_key,
-            abuselist_key,
-            country_key,
-            whitelist_set,
-            blacklist_set,
-            abuselist_set,
-            country_set,
-        ) = (
-            format!("{}_{}", config.set_names.whitelist, ip_version),
-            format!("{}_{}", config.set_names.blacklist, ip_version),
-            format!("{}_{}", config.set_names.abuselist, ip_version),
-            format!("{}_{}", config.set_names.country, ip_version),
-            format!("{}_{}", config.set_names.whitelist, ip_version),
-            format!("{}_{}", config.set_names.blacklist, ip_version),
-            format!("{}_{}", config.set_names.abuselist, ip_version),
-            format!("{}_{}", config.set_names.country, ip_version),
-        );
+    // Configured set names
+    let base_set_names = [
+        &cfg.set_names.whitelist,
+        &cfg.set_names.blacklist,
+        &cfg.set_names.abuselist,
+        &cfg.set_names.country,
+    ];
 
-        match ip_version {
-            IpVersion::V4 => {
-                set_data.insert(
-                    whitelist_key,
-                    sets.get_v4_formatted(&whitelist_set).unwrap_or_default(),
-                );
-                set_data.insert(
-                    blacklist_key,
-                    sets.get_v4_formatted(&blacklist_set).unwrap_or_default(),
-                );
-                set_data.insert(
-                    abuselist_key,
-                    sets.get_v4_formatted(&abuselist_set).unwrap_or_default(),
-                );
-                set_data.insert(
-                    country_key,
-                    sets.get_v4_formatted(&country_set).unwrap_or_default(),
-                );
-            }
-            IpVersion::V6 => {
-                set_data.insert(
-                    whitelist_key,
-                    sets.get_v6_formatted(&whitelist_set).unwrap_or_default(),
-                );
-                set_data.insert(
-                    blacklist_key,
-                    sets.get_v6_formatted(&blacklist_set).unwrap_or_default(),
-                );
-                set_data.insert(
-                    abuselist_key,
-                    sets.get_v6_formatted(&abuselist_set).unwrap_or_default(),
-                );
-                set_data.insert(
-                    country_key,
-                    sets.get_v6_formatted(&country_set).unwrap_or_default(),
-                );
-            }
+    // ... with ip version appended
+    for ip_version in cfg.ip_versions.get_active() {
+        for base_name in base_set_names {
+            let full_name = format!("{}_{}", base_name, ip_version);
+
+            let nets = sets
+                .get_formatted(ip_version, &full_name)
+                .unwrap_or_default();
+
+            set_data.insert(full_name, nets);
         }
     }
 
     // Render template with all context
     use minijinja::context;
     let rules = template.render(context! {
-        iifname => config.iifname.as_deref().unwrap(),
-        default_policy => &config.default_policy,
-        block_policy => &config.block_policy,
-        set_names => &config.set_names,
+        iifname => cfg.iifname.as_deref().unwrap(),
+        default_policy => &cfg.default_policy,
+        block_policy => &cfg.block_policy,
+        set_names => &cfg.set_names,
         sets => set_data,
         ip_versions => context! {
-            v4 => config.ip_versions.v4,
-            v6 => config.ip_versions.v6,
+            v4 => cfg.ip_versions.v4,
+            v6 => cfg.ip_versions.v6,
         },
     })?;
 
@@ -631,84 +541,75 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
 }
 
 fn collect_ip_sets(context: &AppContext) -> IpSets {
-    let config = &context.config;
+    let cfg = &context.config;
     let mut sets = IpSets::new();
-    let pool = ThreadPool::downloader(context.threads, context.timeout);
+    let pool = Arc::new(ThreadPool::downloader(context.threads, context.timeout));
 
-    for ip_version in config.ip_versions.get_active() {
-        info!("Collecting IP sets for {}", ip_version);
+    // We map every URL to the target set name so we know where to put the data later
+    let mut url_map: HashMap<String, (String, IpVersion)> = HashMap::new();
+    let mut all_urls = Vec::new();
 
-        // Process whitelist
-        if let Some(whitelist) = &config.whitelist
-            && let Some(ips) = whitelist.get(&ip_version)
-        {
-            info!(
-                "Processing whitelist for {}: {} entries",
-                ip_version,
-                ips.len()
-            );
-            let set_name = format!("{}_{}", config.set_names.whitelist, ip_version);
-            match ip_version {
-                IpVersion::V4 => sets.insert_v4(set_name, ips.clone()),
-                IpVersion::V6 => sets.insert_v6(set_name, ips.clone()),
-            }
-        }
-
-        // Process blacklist
-        if let Some(blacklist) = &config.blacklist
-            && let Some(ips) = blacklist.get(&ip_version)
-        {
-            info!(
-                "Processing blacklist for {}: {} entries",
-                ip_version,
-                ips.len()
-            );
-            let set_name = format!("{}_{}", config.set_names.blacklist, ip_version);
-            match ip_version {
-                IpVersion::V4 => sets.insert_v4(set_name, ips.clone()),
-                IpVersion::V6 => sets.insert_v6(set_name, ips.clone()),
-            }
-        }
-
-        // Process abuselist
-        if let Some(abuselist) = &config.abuselist
-            && let Some(urls) = abuselist.get(&ip_version)
-        {
-            let asn_template = config
+    for ip_version in cfg.ip_versions.get_active() {
+        // Abuselist
+        if let Some(entries) = cfg.abuselist.as_ref().and_then(|m| m.get(&ip_version)) {
+            let set_name = format!("{}_{}", cfg.set_names.abuselist, ip_version);
+            let asn_tmpl = cfg
                 .asn_urls
                 .as_ref()
-                .and_then(|templates| templates.get(&ip_version))
-                .map(String::as_str);
-            let ip_list = get_abuselist(&pool, urls, ip_version, asn_template);
-            info!(
-                "Processed abuselist for {}: {} entries",
-                ip_version,
-                ip_list.len()
-            );
-            let set_name = format!("{}_{}", config.set_names.abuselist, ip_version);
-            match ip_version {
-                IpVersion::V4 => sets.insert_v4(set_name, ip_list),
-                IpVersion::V6 => sets.insert_v6(set_name, ip_list),
+                .and_then(|t| t.get(&ip_version))
+                .map(std::string::String::as_str);
+
+            let urls = generate_abuselist_urls(entries, ip_version, asn_tmpl);
+            for url in urls {
+                url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                all_urls.push(url);
             }
         }
 
-        // Process country list
-        if let Some(country_list) = &config.country_list
-            && !country_list.is_empty()
-        {
-            let ip_list = get_country_ip_list(&pool, country_list, ip_version);
-            info!(
-                "Processed country list for {}: {} entries",
-                ip_version,
-                ip_list.len()
-            );
-            let set_name = format!("{}_{}", config.set_names.country, ip_version);
-            match ip_version {
-                IpVersion::V4 => sets.insert_v4(set_name, ip_list),
-                IpVersion::V6 => sets.insert_v6(set_name, ip_list),
+        // Country List
+        if let Some(countries) = &cfg.country_list {
+            let set_name = format!("{}_{}", cfg.set_names.country, ip_version);
+            let urls = generate_country_urls(countries, ip_version);
+            for url in urls {
+                url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                all_urls.push(url);
             }
         }
     }
+
+    // Start (consume) all downloads. Returns immediately with a receiver
+    let rx = start_downloads(pool, all_urls);
+
+    // Iterate as they finish (this blocks only as needed)
+    for result in rx {
+        match result.content {
+            Ok(text) => {
+                // Look up where this data belongs
+                if let Some((set_name, version)) = url_map.remove(&result.url) {
+                    debug!("Processing {} lines for {}", text.lines().count(), set_name);
+                    sets.process_content(version, &set_name, (&result.url, &text));
+                }
+            }
+            Err(e) => warn!("Failed to download {}: {}", result.url, e),
+        }
+    }
+
+    let (mut total_v4, mut total_v6) = (0usize, 0usize);
+    for (name, set) in &sets.v4_sets {
+        total_v4 += set.len();
+        info!("Set {}: {} unique IPv4 networks", name, set.len());
+    }
+    for (name, set) in &sets.v6_sets {
+        total_v6 += set.len();
+        info!("Set {}: {} unique IPv6 networks", name, set.len());
+    }
+
+    info!(
+        "Total entries IPv4: {} IPv6: {} total: {}",
+        total_v4,
+        total_v6,
+        total_v4 + total_v6
+    );
 
     sets
 }
@@ -721,6 +622,7 @@ fn get_default_interface() -> Option<String> {
             return Some(fields[0].to_owned());
         }
     }
+
     None
 }
 
@@ -745,6 +647,7 @@ fn run_nft_cli(args: &[&str], dry_run: bool) -> Result<Output> {
         error!("nft command failed: {}", stderr);
         return Err(anyhow::anyhow!("nft execution error: {stderr}"));
     }
+
     Ok(output)
 }
 
@@ -786,6 +689,7 @@ fn run_nft_stdin(rules: &str, dry_run: bool) -> Result<Output> {
         error!("nft command failed: {}", stderr);
         return Err(anyhow::anyhow!("nft execution error: {stderr}"));
     }
+
     Ok(output)
 }
 
@@ -806,23 +710,6 @@ fn start(context: &AppContext) -> Result<()> {
     }
     run_nft_stdin(&rules, context.dry_run)?;
 
-    let (mut total_v4, mut total_v6) = (0usize, 0usize);
-
-    for (setname, ips) in &sets.v4_sets {
-        total_v4 += ips.len();
-        info!("Set IPv4 {}: {} entries", setname, ips.len());
-    }
-    for (setname, ips) in &sets.v6_sets {
-        total_v6 += ips.len();
-        info!("Set IPv6 {}: {} entries", setname, ips.len());
-    }
-    info!(
-        "Total entries IPv4: {} IPv6: {} total: {}",
-        total_v4,
-        total_v6,
-        total_v4 + total_v6
-    );
-
     Ok(())
 }
 
@@ -830,6 +717,7 @@ fn stop() -> Result<()> {
     info!("Stopping nft-void");
     run_nft_cli(&["delete", "table", "netdev", "blackhole"], false)?;
     info!("Successfully deleted nftables table 'netdev blackhole'");
+
     Ok(())
 }
 
@@ -840,10 +728,10 @@ fn refresh(context: &AppContext) -> Result<()> {
 
     let mut flush_commands = String::with_capacity(512);
 
-    let config = &context.config;
-    for ip_version in config.ip_versions.get_active() {
-        let abuselist_set = format!("{}_{}", config.set_names.abuselist, ip_version);
-        let country_set = format!("{}_{}", config.set_names.country, ip_version);
+    let cfg = &context.config;
+    for ip_version in cfg.ip_versions.get_active() {
+        let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
+        let country_set = format!("{}_{}", cfg.set_names.country, ip_version);
 
         writeln!(
             flush_commands,
@@ -863,14 +751,11 @@ fn refresh(context: &AppContext) -> Result<()> {
 
     let mut add_commands = String::with_capacity(4096);
 
-    for ip_version in config.ip_versions.get_active() {
-        let abuselist_set = format!("{}_{}", config.set_names.abuselist, ip_version);
-        let country_set = format!("{}_{}", config.set_names.country, ip_version);
+    for ip_version in cfg.ip_versions.get_active() {
+        let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
+        let country_set = format!("{}_{}", cfg.set_names.country, ip_version);
 
-        let abuselist_elements = match ip_version {
-            IpVersion::V4 => sets.get_v4_formatted(&abuselist_set),
-            IpVersion::V6 => sets.get_v6_formatted(&abuselist_set),
-        };
+        let abuselist_elements = sets.get_formatted(ip_version, &abuselist_set);
 
         if let Some(elements) = abuselist_elements
             && !elements.is_empty()
@@ -882,10 +767,7 @@ fn refresh(context: &AppContext) -> Result<()> {
             )?;
         }
 
-        let country_elements = match ip_version {
-            IpVersion::V4 => sets.get_v4_formatted(&country_set),
-            IpVersion::V6 => sets.get_v6_formatted(&country_set),
-        };
+        let country_elements = sets.get_formatted(ip_version, &country_set);
 
         if let Some(elements) = country_elements
             && !elements.is_empty()
@@ -925,6 +807,7 @@ fn refresh(context: &AppContext) -> Result<()> {
     );
 
     info!("Successfully reloaded ABUSELIST and COUNTRY_LIST sets");
+
     Ok(())
 }
 
@@ -1004,5 +887,6 @@ fn main() -> Result<()> {
     }
 
     info!("Operation completed successfully");
+
     Ok(())
 }

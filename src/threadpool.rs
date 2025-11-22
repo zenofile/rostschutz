@@ -4,8 +4,8 @@ use std::thread;
 use tracing::debug;
 
 pub struct ThreadPool<J, R> {
-    workers: Vec<thread::JoinHandle<()>>,
-    sender: Option<Sender<(J, Sender<R>)>>,
+    pub workers: Vec<thread::JoinHandle<()>>,
+    pub sender: Option<Sender<(J, Sender<R>)>>,
 }
 
 impl<J, R> ThreadPool<J, R>
