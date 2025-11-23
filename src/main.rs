@@ -592,6 +592,24 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
     let mut all_urls = Vec::new();
 
     for ip_version in cfg.ip_versions.get_active() {
+        // Direct ip entry processing
+        // Whitelist
+        if let Some(entries) = cfg.whitelist.as_ref().and_then(|m| m.get(&ip_version)) {
+            let set_name = format!("{}_{}", cfg.set_names.whitelist, ip_version);
+            let nets = entries.join("\n");
+            let src = "direct:WHITELIST";
+            sets.process_content(ip_version, &set_name, (src, &nets));
+        }
+
+        // Blacklist
+        if let Some(entries) = cfg.blacklist.as_ref().and_then(|m| m.get(&ip_version)) {
+            let set_name = format!("{}_{}", cfg.set_names.blacklist, ip_version);
+            let nets = entries.join("\n");
+            let src = "direct:BLACKLIST";
+            sets.process_content(ip_version, &set_name, (src, &nets));
+        }
+
+        // Handle remote content
         // Abuselist
         if let Some(entries) = cfg.abuselist.as_ref().and_then(|m| m.get(&ip_version)) {
             let set_name = IStr::from(format!("{}_{}", cfg.set_names.abuselist, ip_version));
