@@ -96,6 +96,6 @@ table netdev blackhole {
     }
 
     chain log-debug {
-        counter log level debug {{ block_policy }}
+        limit rate 10/minute burst 20 packets counter log level debug {{ block_policy }}
     }
 }

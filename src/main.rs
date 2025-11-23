@@ -75,13 +75,13 @@ struct Config {
     ip_versions: IpVersions,
 
     #[serde(rename = "DEFAULT_POLICY", default = "default_accept")]
-    default_policy: String,
+    default_policy: Box<str>,
 
     #[serde(rename = "SET_NAMES", default)]
     set_names: SetNames,
 
     #[serde(rename = "BLOCK_POLICY", default = "default_drop")]
-    block_policy: String,
+    block_policy: Box<str>,
 
     #[serde(rename = "IIFNAME", default = "get_default_interface")]
     iifname: Option<String>,
@@ -112,31 +112,75 @@ struct AppContext {
     print_stdout: bool,
 }
 
+/// Immutable String (wrapper around Arc<str>)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IStr(Arc<str>);
+
+impl IStr {
+    pub fn new(s: impl Into<Arc<str>>) -> Self {
+        Self(s.into())
+    }
+}
+
+impl std::fmt::Display for IStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Forwards to impl Display for str
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+// Allows IStr to be used like &str
+impl std::ops::Deref for IStr {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+// Easy conversion from string literals and owned strings
+impl From<&str> for IStr {
+    fn from(s: &str) -> Self {
+        Self(Arc::from(s))
+    }
+}
+
+impl From<String> for IStr {
+    fn from(s: String) -> Self {
+        Self(Arc::from(s))
+    }
+}
+
+impl From<Box<str>> for IStr {
+    fn from(s: Box<str>) -> Self {
+        Self(Arc::from(s))
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct SetNames {
-    whitelist: String,
-    blacklist: String,
-    abuselist: String,
-    country: String,
+    whitelist: Box<str>,
+    blacklist: Box<str>,
+    abuselist: Box<str>,
+    country: Box<str>,
 }
 
 impl Default for SetNames {
     fn default() -> Self {
         Self {
-            whitelist: String::from("whitelist"),
-            blacklist: String::from("blacklist"),
-            abuselist: String::from("abuselist"),
-            country: String::from("country"),
+            whitelist: Box::from("whitelist"),
+            blacklist: Box::from("blacklist"),
+            abuselist: Box::from("abuselist"),
+            country: Box::from("country"),
         }
     }
 }
 
-fn default_accept() -> String {
-    String::from("accept")
+fn default_accept() -> Box<str> {
+    Box::from("accept")
 }
 
-fn default_drop() -> String {
-    String::from("drop")
+fn default_drop() -> Box<str> {
+    Box::from("drop")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -341,12 +385,12 @@ impl IpSets {
 
 #[derive(Debug, Clone)]
 struct DownloadJob {
-    url: String,
+    url: IStr,
 }
 
 #[derive(Debug)]
 struct DownloadResult {
-    url: String,
+    url: IStr,
     content: Result<String>,
 }
 
@@ -411,7 +455,7 @@ fn download_url(timeout: u64, job: DownloadJob) -> DownloadResult {
 // Returns a Receiver that yields results as they finish
 fn start_downloads(
     pool: Arc<ThreadPool<DownloadJob, DownloadResult>>,
-    urls: Vec<String>,
+    urls: Vec<IStr>,
 ) -> kanal::Receiver<DownloadResult> {
     let (tx, rx) = kanal::bounded(pool.workers.len() * 2);
 
@@ -433,7 +477,7 @@ fn generate_abuselist_urls(
     entries: &[String],
     ip_version: IpVersion,
     asn_url_template: Option<&str>,
-) -> Vec<String> {
+) -> Vec<IStr> {
     let mut urls = Vec::new();
     let mut asn_urls = Vec::new();
 
@@ -441,7 +485,7 @@ fn generate_abuselist_urls(
         let trimmed = entry.trim();
 
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            urls.push(trimmed.to_owned());
+            urls.push(IStr::from(trimmed));
         } else if trimmed.to_uppercase().starts_with("AS") {
             let digits = &trimmed[2..];
 
@@ -459,7 +503,7 @@ fn generate_abuselist_urls(
                         ),
                     }, |template| template.replace("{asn}", digits));
 
-                asn_urls.push(asn_url);
+                asn_urls.push(IStr::from(asn_url));
             } else {
                 warn!(
                     "Invalid ASN format (must be AS followed by digits): {}",
@@ -481,13 +525,11 @@ fn generate_abuselist_urls(
     all_urls
 }
 
-fn generate_country_urls(countries: &[String], ip_version: IpVersion) -> Vec<String> {
+fn generate_country_urls(countries: &[String], ip_version: IpVersion) -> Vec<IStr> {
     countries.iter().map(|country| {
-        format!(
+        IStr::from(format!(
             "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ip{}/{}.cidr",
-            ip_version,
-            country.to_lowercase()
-        )
+            ip_version, country.to_lowercase()))
     }).collect()
 }
 
@@ -546,13 +588,13 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
     let pool = Arc::new(ThreadPool::downloader(context.threads, context.timeout));
 
     // We map every URL to the target set name so we know where to put the data later
-    let mut url_map: HashMap<String, (String, IpVersion)> = HashMap::new();
+    let mut url_map: HashMap<IStr, (IStr, IpVersion)> = HashMap::new();
     let mut all_urls = Vec::new();
 
     for ip_version in cfg.ip_versions.get_active() {
         // Abuselist
         if let Some(entries) = cfg.abuselist.as_ref().and_then(|m| m.get(&ip_version)) {
-            let set_name = format!("{}_{}", cfg.set_names.abuselist, ip_version);
+            let set_name = IStr::from(format!("{}_{}", cfg.set_names.abuselist, ip_version));
             let asn_tmpl = cfg
                 .asn_urls
                 .as_ref()
@@ -568,7 +610,7 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
 
         // Country List
         if let Some(countries) = &cfg.country_list {
-            let set_name = format!("{}_{}", cfg.set_names.country, ip_version);
+            let set_name = IStr::from(format!("{}_{}", cfg.set_names.country, ip_version));
             let urls = generate_country_urls(countries, ip_version);
             for url in urls {
                 url_map.insert(url.clone(), (set_name.clone(), ip_version));
