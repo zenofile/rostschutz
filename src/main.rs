@@ -69,6 +69,24 @@ enum Action {
     Config,
 }
 
+/// Serde deserializer for single or multiple values
+fn deserialize_one_or_many<'a, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'a>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => Ok(vec![s]),
+        OneOrMany::Many(vec) => Ok(vec),
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 struct LogConfig {
@@ -106,78 +124,54 @@ impl Default for LogConfig {
     }
 }
 
-#[allow(clippy::unnecessary_wraps)]
-fn default_asn_v4() -> Option<String> {
-    Some(
-        "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt"
-            .to_owned(),
-    )
-}
-#[allow(clippy::unnecessary_wraps)]
-fn default_asn_v6() -> Option<String> {
-    Some(
-        "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt"
-            .to_owned(),
-    )
-}
-
-#[allow(clippy::unnecessary_wraps)]
-fn default_country_v4() -> Option<String> {
-    Some("https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/{country}.cidr".to_owned())
-}
-#[allow(clippy::unnecessary_wraps)]
-fn default_country_v6() -> Option<String> {
-    Some("https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/{country}.cidr".to_owned())
-}
-
 #[derive(Debug, Deserialize, Clone)]
 struct AsnSources {
-    #[serde(default = "default_asn_v4")]
-    v4: Option<String>,
-    #[serde(default = "default_asn_v6")]
-    v6: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    v4: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    v6: Vec<String>,
 }
 
 impl Default for AsnSources {
     fn default() -> Self {
         Self {
-            v4: default_asn_v4(),
-            v6: default_asn_v6(),
+            v4: vec!["https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt".to_owned()],
+            v6: vec!["https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt".to_owned()],
         }
     }
 }
 
 impl AsnSources {
-    fn get(&self, version: IpVersion) -> Option<&str> {
+    fn get(&self, version: IpVersion) -> &[String] {
         match version {
-            IpVersion::V4 => self.v4.as_deref(),
-            IpVersion::V6 => self.v6.as_deref(),
+            IpVersion::V4 => &self.v4,
+            IpVersion::V6 => &self.v6,
         }
     }
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct CountrySources {
-    #[serde(default = "default_country_v4")]
-    v4: Option<String>,
-    #[serde(default = "default_country_v6")]
-    v6: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    v4: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    v6: Vec<String>,
 }
 
 impl Default for CountrySources {
     fn default() -> Self {
         Self {
-            v4: default_country_v4(),
-            v6: default_country_v6(),
+            v4: vec!["https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/{country}.cidr".to_owned()],
+            v6: vec!["https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/{country}.cidr".to_owned()],
         }
     }
 }
 
 impl CountrySources {
-    fn get(&self, version: IpVersion) -> Option<&str> {
+    fn get(&self, version: IpVersion) -> &[String] {
         match version {
-            IpVersion::V4 => self.v4.as_deref(),
-            IpVersion::V6 => self.v6.as_deref(),
+            IpVersion::V4 => &self.v4,
+            IpVersion::V6 => &self.v6,
         }
     }
 }
@@ -232,6 +226,7 @@ struct AppContext {
     template: PathBuf,
     timeout: u64,
     threads: usize,
+    verbosity: u8,
     dry_run: bool,
     print_stdout: bool,
 }
@@ -424,8 +419,9 @@ impl IpSets {
 
     #[inline]
     fn strip_comment_and_trim(line: &str) -> &str {
-        let result = line.split_once('#').map_or(line, |(before, _)| before);
-        result.trim()
+        line.split_once('#')
+            .map_or(line, |(before, _)| before)
+            .trim()
     }
 
     #[inline]
@@ -449,26 +445,23 @@ impl IpSets {
         F: Fn(&str) -> Option<T>,
     {
         let (url, content) = data;
-        let mut added = 0;
-        let mut invalid = 0;
-
         let target_set = target_map.entry(set_name.to_owned()).or_default();
 
-        for line in content.lines() {
-            let cleaned = Self::strip_comment_and_trim(line);
-            if cleaned.is_empty() {
-                continue;
-            }
-
-            if let Some(net) = parser(cleaned) {
-                if target_set.insert(net) {
-                    added += 1;
+        let (added, invalid) = content
+            .lines()
+            .map(Self::strip_comment_and_trim)
+            .filter(|s| !s.is_empty())
+            .fold((0, 0), |(mut added, mut invalid), line| {
+                if let Some(net) = parser(line) {
+                    if target_set.insert(net) {
+                        added += 1;
+                    }
+                } else {
+                    invalid += 1;
+                    debug!("Invalid IP entry: {}", line);
                 }
-            } else {
-                invalid += 1;
-                debug!("Invalid IP entry: {}", cleaned);
-            }
-        }
+                (added, invalid)
+            });
 
         Self::log_results(set_name, url, added, invalid);
     }
@@ -605,35 +598,43 @@ fn start_downloads(
     rx
 }
 
-fn generate_abuselist_urls(entries: &[String], tpl: Option<&str>) -> Vec<IStr> {
-    let mut urls = Vec::new();
-    let mut asn_urls = Vec::new();
+fn generate_abuselist_urls(entries: &[String], tmpl_urls: &[String]) -> Vec<IStr> {
+    let mut urls = Vec::with_capacity(entries.len() * tmpl_urls.len().max(1));
 
     for entry in entries {
         let trimmed = entry.trim();
 
+        // Direct URLs
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
             urls.push(IStr::from(trimmed));
-        } else if trimmed.to_uppercase().starts_with("AS") {
-            let digits = &trimmed[2..];
+            continue;
+        }
 
-            if digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
-                if let Some(tmpl) = tpl {
-                    info!("Processing ASN entry: AS{}", digits);
-                    let asn_url = tmpl.replace("{asn}", digits);
-                    asn_urls.push(IStr::from(asn_url));
-                } else {
-                    warn!(
-                        "Skipping ASN entry {} because no source URL is configured for this IP version",
-                        trimmed
-                    );
-                }
-            } else {
+        // ASN processing
+        if trimmed.len() >= 2 && trimmed[..2].eq_ignore_ascii_case("as") {
+            let digits = &trimmed[2..];
+            if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
                 warn!(
                     "Invalid ASN format (must be AS followed by digits): {}",
                     trimmed
                 );
+                continue;
             }
+
+            if tmpl_urls.is_empty() {
+                warn!(
+                    "Skipping ASN entry {} because no source URLs are configured for this IP version",
+                    trimmed
+                );
+                continue;
+            }
+
+            info!("Processing ASN entry: AS{}", digits);
+            urls.extend(
+                tmpl_urls
+                    .iter()
+                    .map(|tmpl| IStr::from(tmpl.replace("{asn}", digits))),
+            );
         } else {
             warn!(
                 "Ignoring entry with unknown format in abuselist: {}",
@@ -642,18 +643,18 @@ fn generate_abuselist_urls(entries: &[String], tpl: Option<&str>) -> Vec<IStr> {
         }
     }
 
-    // Download all URLs (regular URLs and ASN-generated URLs)
-    urls.extend(asn_urls);
-
     urls
 }
 
-#[inline]
-fn generate_country_urls(countries: &[String], tpl: &str) -> Vec<IStr> {
-    #[allow(clippy::literal_string_with_formatting_args)]
+fn generate_country_urls(countries: &[String], tmpl_urls: &[String]) -> Vec<IStr> {
     countries
         .iter()
-        .map(|country| IStr::from(tpl.replace("{country}", &country.to_lowercase())))
+        .map(|country| country.to_lowercase())
+        .flat_map(|country_lower| {
+            tmpl_urls
+                .iter()
+                .map(move |tmpl| IStr::from(tmpl.replace("{country}", &country_lower)))
+        })
         .collect()
 }
 
@@ -679,17 +680,15 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     ];
 
     // ... with ip version appended
-    for ip_version in cfg.ip_versions.get_active() {
-        for base_name in base_set_names {
+    set_data.extend(cfg.ip_versions.get_active().flat_map(|ip_version| {
+        base_set_names.iter().map(move |base_name| {
             let full_name = format!("{}_{}", base_name, ip_version);
-
             let nets = sets
                 .get_formatted(ip_version, &full_name)
                 .unwrap_or_default();
-
-            set_data.insert(full_name, nets);
-        }
-    }
+            (full_name, nets)
+        })
+    }));
 
     // Render template with all context
     use minijinja::context;
@@ -744,28 +743,38 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
         if let Some(entries) = cfg.abuselist.as_ref().and_then(|m| m.get(&ip_version)) {
             let set_name = IStr::from(format!("{}_{}", cfg.set_names.abuselist, ip_version));
             let asn_tmpl = cfg.sources.asn.get(ip_version);
-            let urls = generate_abuselist_urls(entries, asn_tmpl);
 
-            for url in urls {
-                url_map.insert(url.clone(), (set_name.clone(), ip_version));
-                all_urls.push(url);
+            if asn_tmpl.is_empty() {
+                debug!("Skipping ASN list for {} (source disabled)", ip_version);
+                continue;
             }
+
+            all_urls.extend(
+                generate_abuselist_urls(entries, asn_tmpl)
+                    .into_iter()
+                    .inspect(|url| {
+                        url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                    }),
+            );
         }
 
         // Country List
         if let Some(countries) = &cfg.country_list {
             let set_name = IStr::from(format!("{}_{}", cfg.set_names.country, ip_version));
+            let country_tmpl = cfg.sources.country.get(ip_version);
 
-            if let Some(country_tmpl) = cfg.sources.country.get(ip_version) {
-                let urls = generate_country_urls(countries, country_tmpl);
-
-                for url in urls {
-                    url_map.insert(url.clone(), (set_name.clone(), ip_version));
-                    all_urls.push(url);
-                }
+            if country_tmpl.is_empty() {
+                debug!("Skipping country list for {} (source disabled)", ip_version);
+                continue;
             }
-        } else {
-            debug!("Skipping country list for {} (source disabled)", ip_version);
+
+            all_urls.extend(
+                generate_country_urls(countries, country_tmpl)
+                    .into_iter()
+                    .inspect(|url| {
+                        url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                    }),
+            );
         }
     }
 
@@ -774,28 +783,30 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
 
     // Iterate as they finish (this blocks only as needed)
     for result in rx {
-        match result.content {
-            Ok(text) => {
-                // Look up where this data belongs
-                if let Some((set_name, version)) = url_map.remove(&result.url) {
-                    debug!("Processing {} lines for {}", text.lines().count(), set_name);
-                    sets.process_content(version, &set_name, (&result.url, &text));
-                }
+        let text = match result.content {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("Failed to download {}: {}", result.url, e);
+                continue;
             }
-            Err(e) => warn!("Failed to download {}: {}", result.url, e),
+        };
+
+        let Some((set_name, version)) = url_map.remove(&result.url) else {
+            // Optionally log that a result arrived for an unknown/duplicate URL
+            continue;
+        };
+
+        // Computational expensive, debug mode only
+        if context.verbosity >= 2 {
+            // Skip unicode validation for line counting
+            #[allow(clippy::naive_bytecount)]
+            let count = text.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
+            debug!("Processing {} lines for {}", count, set_name);
         }
+        sets.process_content(version, &set_name, (&result.url, &text));
     }
 
-    let (mut total_v4, mut total_v6) = (0usize, 0usize);
-    for (name, set) in &sets.v4_sets {
-        total_v4 += set.len();
-        info!("Set {}: {} unique IPv4 networks", name, set.len());
-    }
-    for (name, set) in &sets.v6_sets {
-        total_v6 += set.len();
-        info!("Set {}: {} unique IPv6 networks", name, set.len());
-    }
-
+    let (total_v4, total_v6) = calculate_totals(&sets);
     info!(
         "Total entries IPv4: {} IPv6: {} total: {}",
         total_v4,
@@ -807,15 +818,19 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
 }
 
 fn get_default_interface() -> Option<String> {
-    let contents = fs::read_to_string("/proc/net/route").ok()?;
-    for line in contents.lines().skip(1) {
-        let fields = line.split_whitespace().collect::<Vec<&str>>();
-        if fields.len() >= 2 && fields[1] == "00000000" {
-            return Some(fields[0].to_owned());
-        }
-    }
-
-    None
+    fs::read_to_string("/proc/net/route")
+        .ok()?
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let first = parts.next()?;
+            if parts.next()? == "00000000" {
+                Some(first.to_owned())
+            } else {
+                None
+            }
+        })
 }
 
 fn run_nft_cli(args: &[&str], dry_run: bool) -> Result<Output> {
@@ -890,6 +905,23 @@ fn write_to_stdout(buf: &str) -> Result<()> {
     let mut handle = stdout.lock();
     handle.write_all(buf.as_bytes())?;
     Ok(())
+}
+
+fn calculate_totals(sets: &IpSets) -> (usize, usize) {
+    let total_v4: usize = sets
+        .v4_sets
+        .iter()
+        .inspect(|(name, set)| info!("Set {}: {} unique IPv4 networks", name, set.len()))
+        .map(|(_, set)| set.len())
+        .sum();
+
+    let total_v6: usize = sets
+        .v6_sets
+        .iter()
+        .inspect(|(name, set)| info!("Set {}: {} unique IPv6 networks", name, set.len()))
+        .map(|(_, set)| set.len())
+        .sum();
+    (total_v4, total_v6)
 }
 
 fn start(context: &AppContext) -> Result<()> {
@@ -979,18 +1011,7 @@ fn refresh(context: &AppContext) -> Result<()> {
         run_nft_stdin(&add_commands, context.dry_run)?;
     }
 
-    let (mut total_v4, mut total_v6) = (0usize, 0usize);
-
-    for (setname, ips) in &sets.v4_sets {
-        total_v4 += ips.len();
-        info!("Reloaded IPv4 set {}: {} entries", setname, ips.len());
-    }
-
-    for (setname, ips) in &sets.v6_sets {
-        total_v6 += ips.len();
-        info!("Reloaded IPv6 set {}: {} entries", setname, ips.len());
-    }
-
+    let (total_v4, total_v6) = calculate_totals(&sets);
     info!(
         "Reloaded total entries IPv4: {} IPv6: {} total: {}",
         total_v4,
@@ -1055,6 +1076,7 @@ fn main() -> Result<()> {
         template: cli.template,
         timeout: cli.timeout,
         threads: cli.threads,
+        verbosity: cli.verbose,
         dry_run: cli.dry_run,
         print_stdout,
     };

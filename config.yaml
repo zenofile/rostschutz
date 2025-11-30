@@ -31,12 +31,16 @@
 
 ## ASN and country IP sources, `null` means don't process, no key/commented means default url
 # SOURCES:
-#   asn:
-#     v4: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt"
-#     v6: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt"
-#   country:
-#     v4: "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/{country}.cidr"
-#     v6: "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/{country}.cidr"
+#   asn:                                                                                                                                                                              
+#     v4: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt"                                                                                      
+#     v6: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt"                                                                                      
+#   country:                                                                                                                                                                          
+#     v4: "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/{country}.cidr"                                                                               
+#      # - "https://raw.githubusercontent.com/firehol/blocklist-ipsets/refs/heads/master/geolite2_country/country_{country}.netset"                                                    
+#      # - "https://raw.githubusercontent.com/firehol/blocklist-ipsets/refs/heads/master/ip2location_country/ip2location_country_{country}.netset"                                     
+#      # - "https://raw.githubusercontent.com/firehol/blocklist-ipsets/refs/heads/master/ipdeny_country/id_country_{country}.netset"                                                   
+#      # - "https://raw.githubusercontent.com/firehol/blocklist-ipsets/refs/heads/master/ipip_country/ipip_country_{country}.netset"                                                   
+#     v6: "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/{country}.cidr" 
 
 ## Whitelist: IP or Network adresses
 WHITELIST:
