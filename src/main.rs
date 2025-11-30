@@ -72,40 +72,140 @@ enum Action {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 struct LogConfig {
+    #[serde(default = "default_log_enabled")]
     enabled: bool,
+    #[serde(default = "default_log_rate")]
     rate: u64,
+    #[serde(default = "default_log_burst")]
     burst: u64,
+}
+
+const fn default_log_enabled() -> bool {
+    true
+}
+const fn default_log_rate() -> u64 {
+    10
+}
+const fn default_log_burst() -> u64 {
+    5
 }
 
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            rate: 10,
-            burst: 5,
+            enabled: default_log_enabled(),
+            rate: default_log_rate(),
+            burst: default_log_burst(),
         }
     }
 }
 
+#[allow(clippy::unnecessary_wraps)]
+fn default_asn_v4() -> Option<String> {
+    Some(
+        "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt"
+            .to_owned(),
+    )
+}
+#[allow(clippy::unnecessary_wraps)]
+fn default_asn_v6() -> Option<String> {
+    Some(
+        "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt"
+            .to_owned(),
+    )
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn default_country_v4() -> Option<String> {
+    Some("https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/{country}.cidr".to_owned())
+}
+#[allow(clippy::unnecessary_wraps)]
+fn default_country_v6() -> Option<String> {
+    Some("https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/{country}.cidr".to_owned())
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AsnSources {
+    #[serde(default = "default_asn_v4")]
+    v4: Option<String>,
+    #[serde(default = "default_asn_v6")]
+    v6: Option<String>,
+}
+
+impl Default for AsnSources {
+    fn default() -> Self {
+        Self {
+            v4: default_asn_v4(),
+            v6: default_asn_v6(),
+        }
+    }
+}
+
+impl AsnSources {
+    fn get(&self, version: IpVersion) -> Option<&str> {
+        match version {
+            IpVersion::V4 => self.v4.as_deref(),
+            IpVersion::V6 => self.v6.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct CountrySources {
+    #[serde(default = "default_country_v4")]
+    v4: Option<String>,
+    #[serde(default = "default_country_v6")]
+    v6: Option<String>,
+}
+
+impl Default for CountrySources {
+    fn default() -> Self {
+        Self {
+            v4: default_country_v4(),
+            v6: default_country_v6(),
+        }
+    }
+}
+
+impl CountrySources {
+    fn get(&self, version: IpVersion) -> Option<&str> {
+        match version {
+            IpVersion::V4 => self.v4.as_deref(),
+            IpVersion::V6 => self.v6.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct Sources {
+    #[serde(default)]
+    asn: AsnSources,
+    #[serde(default)]
+    country: CountrySources,
+}
+
 #[derive(Debug, Deserialize)]
 struct Config {
-    #[serde(rename = "IP_VERSIONS")]
+    #[serde(rename = "IP_VERSIONS", default)]
     ip_versions: IpVersions,
 
     #[serde(rename = "DEFAULT_POLICY", default = "default_accept")]
     default_policy: Box<str>,
 
-    #[serde(rename = "SET_NAMES", default)]
-    set_names: SetNames,
-
     #[serde(rename = "BLOCK_POLICY", default = "default_drop")]
     block_policy: Box<str>,
 
-    #[serde(rename = "LOGGING")]
-    logging: LogConfig,
-
     #[serde(rename = "IIFNAME", default = "get_default_interface")]
     iifname: Option<String>,
+
+    #[serde(rename = "SET_NAMES", default)]
+    set_names: SetNames,
+
+    #[serde(rename = "LOGGING", default)]
+    logging: LogConfig,
+
+    #[serde(rename = "SOURCES", default)]
+    sources: Sources,
 
     #[serde(rename = "WHITELIST")]
     whitelist: Option<HashMap<IpVersion, Vec<String>>>,
@@ -118,9 +218,6 @@ struct Config {
 
     #[serde(rename = "COUNTRY_LIST")]
     country_list: Option<Vec<String>>,
-
-    #[serde(rename = "ASN_URLS")]
-    asn_urls: Option<HashMap<IpVersion, String>>,
 }
 
 #[derive(Debug)]
@@ -242,6 +339,12 @@ impl IpVersions {
     }
 }
 
+impl Default for IpVersions {
+    fn default() -> Self {
+        Self { v4: true, v6: true }
+    }
+}
+
 impl std::fmt::Display for IpVersions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut iter = self.get_active();
@@ -298,6 +401,7 @@ impl std::fmt::Display for Config {
             writeln!(f, "LOGGING: disabled")?;
         }
 
+        writeln!(f, "SOURCES: {:?}", self.sources)?;
         writeln!(f, "IIFNAME: {:?}", self.iifname)?;
         writeln!(f, "WHITELIST: {:?}", self.whitelist)?;
         writeln!(f, "BLACKLIST: {:?}", self.blacklist)?;
@@ -505,11 +609,7 @@ fn start_downloads(
     rx
 }
 
-fn generate_abuselist_urls(
-    entries: &[String],
-    ip_version: IpVersion,
-    asn_url_template: Option<&str>,
-) -> Vec<IStr> {
+fn generate_abuselist_urls(entries: &[String], template: Option<&str>) -> Vec<IStr> {
     let mut urls = Vec::new();
     let mut asn_urls = Vec::new();
 
@@ -522,20 +622,16 @@ fn generate_abuselist_urls(
             let digits = &trimmed[2..];
 
             if digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
-                info!("Processing ASN entry: AS{} for {}", digits, ip_version);
-
-                let asn_url = asn_url_template.map_or_else(|| match ip_version {
-                        IpVersion::V4 => format!(
-                            "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{}/ipv4-aggregated.txt",
-                            digits
-                        ),
-                        IpVersion::V6 => format!(
-                            "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{}/ipv6-aggregated.txt",
-                            digits
-                        ),
-                    }, |template| template.replace("{asn}", digits));
-
-                asn_urls.push(IStr::from(asn_url));
+                if let Some(tmpl) = template {
+                    info!("Processing ASN entry: AS{}", digits);
+                    let asn_url = tmpl.replace("{asn}", digits);
+                    asn_urls.push(IStr::from(asn_url));
+                } else {
+                    warn!(
+                        "Skipping ASN entry {} because no source URL is configured for this IP version",
+                        trimmed
+                    );
+                }
             } else {
                 warn!(
                     "Invalid ASN format (must be AS followed by digits): {}",
@@ -551,18 +647,18 @@ fn generate_abuselist_urls(
     }
 
     // Download all URLs (regular URLs and ASN-generated URLs)
-    let mut all_urls = urls;
-    all_urls.extend(asn_urls);
+    urls.extend(asn_urls);
 
-    all_urls
+    urls
 }
 
-fn generate_country_urls(countries: &[String], ip_version: IpVersion) -> Vec<IStr> {
-    countries.iter().map(|country| {
-        IStr::from(format!(
-            "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ip{}/{}.cidr",
-            ip_version, country.to_lowercase()))
-    }).collect()
+#[inline]
+fn generate_country_urls(countries: &[String], template: &str) -> Vec<IStr> {
+    #[allow(clippy::literal_string_with_formatting_args)]
+    countries
+        .iter()
+        .map(|country| IStr::from(template.replace("{country}", &country.to_lowercase())))
+        .collect()
 }
 
 fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
@@ -634,6 +730,7 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
             let set_name = format!("{}_{}", cfg.set_names.whitelist, ip_version);
             let nets = entries.join("\n");
             let src = "direct:WHITELIST";
+
             sets.process_content(ip_version, &set_name, (src, &nets));
         }
 
@@ -642,6 +739,7 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
             let set_name = format!("{}_{}", cfg.set_names.blacklist, ip_version);
             let nets = entries.join("\n");
             let src = "direct:BLACKLIST";
+
             sets.process_content(ip_version, &set_name, (src, &nets));
         }
 
@@ -649,13 +747,9 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
         // Abuselist
         if let Some(entries) = cfg.abuselist.as_ref().and_then(|m| m.get(&ip_version)) {
             let set_name = IStr::from(format!("{}_{}", cfg.set_names.abuselist, ip_version));
-            let asn_tmpl = cfg
-                .asn_urls
-                .as_ref()
-                .and_then(|t| t.get(&ip_version))
-                .map(std::string::String::as_str);
+            let asn_tmpl = cfg.sources.asn.get(ip_version);
+            let urls = generate_abuselist_urls(entries, asn_tmpl);
 
-            let urls = generate_abuselist_urls(entries, ip_version, asn_tmpl);
             for url in urls {
                 url_map.insert(url.clone(), (set_name.clone(), ip_version));
                 all_urls.push(url);
@@ -665,11 +759,17 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
         // Country List
         if let Some(countries) = &cfg.country_list {
             let set_name = IStr::from(format!("{}_{}", cfg.set_names.country, ip_version));
-            let urls = generate_country_urls(countries, ip_version);
-            for url in urls {
-                url_map.insert(url.clone(), (set_name.clone(), ip_version));
-                all_urls.push(url);
+
+            if let Some(country_tmpl) = cfg.sources.country.get(ip_version) {
+                let urls = generate_country_urls(countries, country_tmpl);
+
+                for url in urls {
+                    url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                    all_urls.push(url);
+                }
             }
+        } else {
+            debug!("Skipping country list for {} (source disabled)", ip_version);
         }
     }
 

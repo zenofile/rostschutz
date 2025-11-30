@@ -1,38 +1,44 @@
-# IP versions supported: 'on' or 'off', default 'off'
-IP_VERSIONS:
-  v4: on
-  v6: on
+## IP versions supported: 'on' or 'off', default 'off'
+# IP_VERSIONS:
+#   v4: on
+#   v6: on
 
-SET_NAMES:
-  whitelist: whitelist
-  blacklist: blacklist
-  abuselist: abuselist
-  country: country
+## Default chain policy
+# DEFAULT_POLICY: accept
 
-# Default chain policy
-DEFAULT_POLICY: accept
+## Block policy: 'drop' or 'reject', default: 'drop'
+# BLOCK_POLICY: drop
 
-# Block policy: 'drop' or 'reject', default: 'drop'
-BLOCK_POLICY: drop
-
-# Logging configuration
-# enable: Turn logging on or off (true/false)
-# rate: Packet rate limit (packets/minute)
-# burst: Packet burst limit
-LOGGING:
-  enabled: true
-  rate: 10
-  burst: 5
-
-# Input interface name. If this is commented out, the default gateway interface will be used
+## Input interface name. If this is commented out, the default gateway interface will be used
 # IIFNAME: eth0
 
-# ASN URL templates - use {asn} as placeholder for the ASN number
-ASN_URLS:
-  v4: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt"
-  v6: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt"
+## Set names as they appear in the template without ip version suffix
+# SET_NAMES:
+#   whitelist: whitelist
+#   blacklist: blacklist
+#   abuselist: abuselist
+#   country: country
 
-# Whitelist: IP or Network adresses
+
+## Logging configuration
+## enable: Turn logging on or off (true/false)
+## rate: Packet rate limit (packets/minute)
+## burst: Packet burst limit
+# LOGGING:
+#   enabled: true
+#   rate: 10
+#   burst: 5
+
+## ASN and country IP sources, `null` means don't process, no key/commented means default url
+# SOURCES:
+#   asn:
+#     v4: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt"
+#     v6: "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt"
+#   country:
+#     v4: "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/{country}.cidr"
+#     v6: "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/{country}.cidr"
+
+## Whitelist: IP or Network adresses
 WHITELIST:
   v4:
     - 127.0.0.1
@@ -50,7 +56,6 @@ BLACKLIST:
     - 1.1.1.1
     - 8.8.8.8
     - 9.9.9.9
-  v6:
 
 # URLs to direct IP or CIDR notation or AS<digits>
 # For example, with: https://iplists.firehol.org/
@@ -65,7 +70,7 @@ ABUSELIST:
     - AS37963 #ALIBABA-CN-NET
     - AS45102 #ALIBABA-CN-NET
 
-# Country list: two letter country codes defined in ISO 3166-1
-# https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2#Officially_assigned_code_elements
+## Country list: two letter country codes defined in ISO 3166-1
+## https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2#Officially_assigned_code_elements
 COUNTRY_LIST:
   - cn 
