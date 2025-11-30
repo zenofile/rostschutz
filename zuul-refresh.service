@@ -1,13 +1,13 @@
-# /etc/systemd/system/nft-void-refresh.service
+# /etc/systemd/system/zuul-refresh.service
 [Unit]
-Description=nft-void periodic refresh
-Documentation=https://github.com/zenofile/nft-void
-Requires=nft-void-main.service
-After=nft-voidmain.service
+Description=zuul periodic refresh
+Documentation=https://github.com/zenofile/zuul
+Requires=zuul-main.service
+After=zuulmain.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/nft-void -v -c /usr/local/etc/nft-void/config.yaml -t /usr/local/etc/nft-void/template.jinja2 refresh
+ExecStart=/usr/local/bin/zuul -v -c /usr/local/etc/zuul/config.yaml -t /usr/local/etc/zuul/template.jinja2 refresh
 TimeoutStartSec=120
 
 # Security Hardening - Capabilities
@@ -20,7 +20,7 @@ ProtectSystem=full
 ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/run
-ConfigurationDirectory=nft-void
+ConfigurationDirectory=zuul
 ConfigurationDirectoryMode=0750
 
 # Security Hardening - Kernel Protection

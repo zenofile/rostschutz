@@ -1,24 +1,33 @@
 cargo-features = ["profile-rustflags"]
 
 [package]
-name = "nft-void"
-version = "0.1.0"
+authors = ["zenofile", "zenofile <zenofile-sf6@unsha.re>"]
+categories = ["command-line-utilities"]
+description = "Nftables (nft) rule generator"
 edition = "2024"
+keywords = ["nft", "nftables", "netfilter", "firewall", "blackhole"]
+license = "GPL-3.0-or-later"
+name = "zuul"
+publish = false
+readme = "README.md"
+repository = "https://github.com/zenofile/zuul.git"
+rust-version = "1.93"
+version = "0.1.0"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+curl = { version = "0.4" }
 ipnet = "2"
+kanal = { version = "0.1", default-features = false }
 minijinja = { version = "2", default-features = false, features = ["serde"] }
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "0.0.10"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-journald = "0.3"
-regex = "1"
 thiserror = "2"
-kanal = { version = "0.1", default-features = false }
-curl = { version = "0.4", features = ["http2"] }
+tracing = "0.1"
+tracing-journald = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 static = ["curl/static-curl", "curl/rustls"]
@@ -27,13 +36,13 @@ static = ["curl/static-curl", "curl/rustls"]
 incremental = true
 
 [profile.release]
-overflow-checks = false
-strip = "symbols"
-lto = "thin"
-panic = "abort"
 codegen-units = 1
+lto = "thin"
 opt-level = 3
+overflow-checks = false
+panic = "abort"
 rustflags = ["-C", "target-cpu=native"]
+strip = "symbols"
 
 [lints]
 
@@ -46,9 +55,8 @@ unsafe_code = "allow"
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 cargo = { level = "warn", priority = 0 }
-nursery = { level = "warn", priority = 0 }
-pedantic = { level = "warn", priority = 0 }
 items_after_statements = { level = "allow", priority = 1 }
 multiple_crate_versions = { level = "allow", priority = 1 }
+nursery = { level = "warn", priority = 0 }
+pedantic = { level = "warn", priority = 0 }
 uninlined_format_args = { level = "allow", priority = 1 }
-cargo_common_metadata = { level = "allow", priority = 1 }

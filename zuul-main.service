@@ -1,5 +1,19 @@
-# /etc/systemd/system/nft-void.service
+# /etc/systemd/system/zuul.service
+[Unit]
+Description=zuul - nftables IP blocking service
+Documentation=https://github.com/zenofile/zuul
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
 [Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/zuul -v -c /usr/local/etc/zuul/config.yaml -t /usr/local/etc/zuul/template.jinja2 start
+ExecStop=/usr/local/bin/zuul -v -c /usr/local/etc/zuul/config.yaml -t /usr/local/etc/zuul/template.jinja2 stop
+ExecReload=/usr/local/bin/zuul -v -c /usr/local/etc/zuul/config.yaml -t /usr/local/etc/zuul/template.jinja2 refresh
+TimeoutStartSec=120
+TimeoutStopSec=30
+
 # Security Hardening - Capabilities
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
@@ -10,7 +24,7 @@ ProtectSystem=full
 ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/run
-ConfigurationDirectory=nft-void
+ConfigurationDirectory=zuul
 ConfigurationDirectoryMode=0750
 
 # Security Hardening - Kernel Protection
@@ -54,3 +68,6 @@ KeyringMode=private
 LimitNOFILE=1024
 LimitNPROC=64
 TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,16 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright © 2025 zenofile <zenofile-sf6@unsha.re>
+
+mod cli;
+mod config;
+mod istr;
 mod threadpool;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use ipnet::{Ipv4Net, Ipv6Net};
-use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap},
     fs,
     io::Write,
@@ -15,210 +21,12 @@ use std::{
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::prelude::*;
 
-use crate::threadpool::ThreadPool;
-
-#[derive(Parser, Debug)]
-#[command(name = "nft-void")]
-#[command(about = "Script to block IPs in nftables by country and abuselists", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    action: Action,
-
-    /// Path to configuration file
-    #[arg(required = true, short, long)]
-    config: PathBuf,
-
-    /// Path to template file
-    #[arg(required = true, short, long)]
-    template: PathBuf,
-
-    /// Increase verbosity level (-v, -vv, -vvv, etc.)
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    verbose: u8,
-
-    /// Number of worker threads
-    #[arg(short = 'w', long, default_value_t = 4)]
-    threads: usize,
-
-    /// Timeout for requests in seconds
-    #[arg(long, default_value_t = 10)]
-    timeout: u64,
-
-    /// Perform a dry-run without making actual changes
-    #[arg(short = 'n', long)]
-    dry_run: bool,
-}
-
-#[derive(Subcommand, Debug)]
-enum Action {
-    /// Start nft-void and create firewall rules
-    Start {
-        #[arg(short = 'o', long = "stdout")]
-        print_stdout: bool,
-    },
-    /// Stop nft-void and remove firewall rules
-    Stop,
-    /// Restart nft-void (stop then start)
-    Restart,
-    /// Update lists
-    Refresh {
-        #[arg(short = 'o', long = "stdout")]
-        print_stdout: bool,
-    },
-    /// Display current configuration
-    Config,
-}
-
-/// Serde deserializer for single or multiple values
-fn deserialize_one_or_many<'a, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'a>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany {
-        One(String),
-        Many(Vec<String>),
-    }
-
-    match OneOrMany::deserialize(deserializer)? {
-        OneOrMany::One(s) => Ok(vec![s]),
-        OneOrMany::Many(vec) => Ok(vec),
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(default)]
-struct LogConfig {
-    #[serde(default = "default_log_enabled")]
-    enabled: bool,
-    #[serde(default = "default_log_enabled")]
-    ratelimiting: bool,
-    #[serde(default = "default_log_rate")]
-    rate: u64,
-    #[serde(default = "default_log_burst")]
-    burst: u64,
-}
-
-const fn default_log_enabled() -> bool {
-    true
-}
-const fn default_log_ratelimiting() -> bool {
-    true
-}
-const fn default_log_rate() -> u64 {
-    10
-}
-const fn default_log_burst() -> u64 {
-    5
-}
-
-impl Default for LogConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_log_enabled(),
-            ratelimiting: default_log_ratelimiting(),
-            rate: default_log_rate(),
-            burst: default_log_burst(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct AsnSources {
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    v4: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    v6: Vec<String>,
-}
-
-impl Default for AsnSources {
-    fn default() -> Self {
-        Self {
-            v4: vec!["https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv4-aggregated.txt".to_owned()],
-            v6: vec!["https://raw.githubusercontent.com/ipverse/asn-ip/master/as/{asn}/ipv6-aggregated.txt".to_owned()],
-        }
-    }
-}
-
-impl AsnSources {
-    fn get(&self, version: IpVersion) -> &[String] {
-        match version {
-            IpVersion::V4 => &self.v4,
-            IpVersion::V6 => &self.v6,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct CountrySources {
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    v4: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    v6: Vec<String>,
-}
-
-impl Default for CountrySources {
-    fn default() -> Self {
-        Self {
-            v4: vec!["https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/{country}.cidr".to_owned()],
-            v6: vec!["https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/{country}.cidr".to_owned()],
-        }
-    }
-}
-
-impl CountrySources {
-    fn get(&self, version: IpVersion) -> &[String] {
-        match version {
-            IpVersion::V4 => &self.v4,
-            IpVersion::V6 => &self.v6,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
-struct Sources {
-    #[serde(default)]
-    asn: AsnSources,
-    #[serde(default)]
-    country: CountrySources,
-}
-
-#[derive(Debug, Deserialize)]
-struct Config {
-    #[serde(rename = "IP_VERSIONS", default)]
-    ip_versions: IpVersions,
-
-    #[serde(rename = "DEFAULT_POLICY", default = "default_accept")]
-    default_policy: Box<str>,
-
-    #[serde(rename = "BLOCK_POLICY", default = "default_drop")]
-    block_policy: Box<str>,
-
-    #[serde(rename = "IIFNAME", default = "get_default_interface")]
-    iifname: Option<String>,
-
-    #[serde(rename = "SET_NAMES", default)]
-    set_names: SetNames,
-
-    #[serde(rename = "LOGGING", default)]
-    logging: LogConfig,
-
-    #[serde(rename = "SOURCES", default)]
-    sources: Sources,
-
-    #[serde(rename = "WHITELIST")]
-    whitelist: Option<HashMap<IpVersion, Vec<String>>>,
-
-    #[serde(rename = "BLACKLIST")]
-    blacklist: Option<HashMap<IpVersion, Vec<String>>>,
-
-    #[serde(rename = "ABUSELIST")]
-    abuselist: Option<HashMap<IpVersion, Vec<String>>>,
-
-    #[serde(rename = "COUNTRY_LIST")]
-    country_list: Option<Vec<String>>,
-}
+use crate::{
+    cli::{Action, Cli},
+    config::{Config, IpVersion, resolve_fragment},
+    istr::IStr,
+    threadpool::ThreadPool,
+};
 
 #[derive(Debug)]
 struct AppContext {
@@ -231,182 +39,13 @@ struct AppContext {
     print_stdout: bool,
 }
 
-/// Immutable String (wrapper around Arc<str>)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IStr(Arc<str>);
-
-impl IStr {
-    pub fn new(s: impl Into<Arc<str>>) -> Self {
-        Self(s.into())
-    }
-}
-
-impl std::fmt::Display for IStr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Forwards to impl Display for str
-        std::fmt::Display::fmt(&self.0, f)
-    }
-}
-
-// Allows IStr to be used like &str
-impl std::ops::Deref for IStr {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-// Easy conversion from string literals and owned strings
-impl From<&str> for IStr {
-    fn from(s: &str) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-impl From<String> for IStr {
-    fn from(s: String) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-impl From<Box<str>> for IStr {
-    fn from(s: Box<str>) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct SetNames {
-    whitelist: Box<str>,
-    blacklist: Box<str>,
-    abuselist: Box<str>,
-    country: Box<str>,
-}
-
-impl Default for SetNames {
-    fn default() -> Self {
-        Self {
-            whitelist: Box::from("whitelist"),
-            blacklist: Box::from("blacklist"),
-            abuselist: Box::from("abuselist"),
-            country: Box::from("country"),
-        }
-    }
-}
-
-fn default_accept() -> Box<str> {
-    Box::from("accept")
-}
-
-fn default_drop() -> Box<str> {
-    Box::from("drop")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum IpVersion {
-    #[serde(rename = "v4")]
-    V4,
-    #[serde(rename = "v6")]
-    V6,
-}
-
-impl IpVersion {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::V4 => "v4",
-            Self::V6 => "v6",
-        }
-    }
-}
-
-impl std::fmt::Display for IpVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct IpVersions {
-    v4: bool,
-    v6: bool,
-}
-
-impl IpVersions {
-    fn get_active(&self) -> impl Iterator<Item = IpVersion> {
-        let v4 = self.v4.then_some(IpVersion::V4);
-        let v6 = self.v6.then_some(IpVersion::V6);
-        v4.into_iter().chain(v6)
-    }
-}
-
-impl Default for IpVersions {
-    fn default() -> Self {
-        Self { v4: true, v6: true }
-    }
-}
-
-impl std::fmt::Display for IpVersions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut iter = self.get_active();
-
-        match iter.next() {
-            None => write!(f, "none"),
-            Some(first) => {
-                write!(f, "{}", first)?;
-                for version in iter {
-                    write!(f, ", {}", version)?;
-                }
-
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Config {
-    fn load(path: &PathBuf) -> Result<Self> {
-        info!("Loading config from: {}", path.display());
-        let content = fs::read_to_string(path)
-            .context(format!("Failed to read config file: {}", path.display()))?;
-
-        let config: Self =
-            serde_saphyr::from_str(&content).context("Failed to parse YAML configuration")?;
-
-        if !config.ip_versions.v4 && !config.ip_versions.v6 {
-            anyhow::bail!("At least one IP version (v4 or v6) must be enabled");
-        }
-
-        Ok(config)
-    }
-}
-
-impl std::fmt::Display for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "IP_VERSIONS: v4={}, v6={}",
-            self.ip_versions.v4, self.ip_versions.v6
-        )?;
-        writeln!(f, "SET_NAMES: {:?}", self.set_names)?;
-        writeln!(f, "DEFAULT_POLICY: {}", self.default_policy)?;
-        writeln!(f, "BLOCK_POLICY: {}", self.block_policy)?;
-        writeln!(f, "LOGGING: {:?}", self.logging)?;
-        writeln!(f, "SOURCES: {:?}", self.sources)?;
-        writeln!(f, "IIFNAME: {:?}", self.iifname)?;
-        writeln!(f, "WHITELIST: {:?}", self.whitelist)?;
-        writeln!(f, "BLACKLIST: {:?}", self.blacklist)?;
-        writeln!(f, "ABUSELIST: {:?}", self.abuselist)?;
-        writeln!(f, "COUNTRY_LIST: {:?}", self.country_list)?;
-
-        Ok(())
-    }
-}
+/// Generic `NetSet` type
+type NetSets<T> = HashMap<IStr, BTreeSet<T>>;
 
 #[derive(Debug)]
 struct IpSets {
-    v4_sets: HashMap<String, BTreeSet<Ipv4Net>>,
-    v6_sets: HashMap<String, BTreeSet<Ipv6Net>>,
+    v4_sets: NetSets<Ipv4Net>,
+    v6_sets: NetSets<Ipv6Net>,
 }
 
 impl IpSets {
@@ -435,17 +74,13 @@ impl IpSets {
         debug!("Set {}: Added {} new entries from {}", set_name, added, url);
     }
 
-    fn process_ips<T, F>(
-        target_map: &mut HashMap<String, BTreeSet<T>>,
-        set_name: &str,
-        data: (&str, &str),
-        parser: F,
-    ) where
+    fn process_ips<T, F>(target_map: &mut NetSets<T>, set_name: &str, data: (&str, &str), parser: F)
+    where
         T: Ord + Copy + std::fmt::Debug,
         F: Fn(&str) -> Option<T>,
     {
         let (url, content) = data;
-        let target_set = target_map.entry(set_name.to_owned()).or_default();
+        let target_set = target_map.entry(IStr::from(set_name)).or_default();
 
         let (added, invalid) = content
             .lines()
@@ -485,10 +120,7 @@ impl IpSets {
         }
     }
 
-    fn get_formatted_generic<T>(
-        map: &HashMap<String, BTreeSet<T>>,
-        set_name: &str,
-    ) -> Option<String>
+    fn get_formatted_generic<T>(map: &NetSets<T>, set_name: &str) -> Option<String>
     where
         T: std::fmt::Display,
     {
@@ -496,7 +128,7 @@ impl IpSets {
             nets.iter()
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<String>>()
-                .join(",\n        ")
+                .join(",\n\t\t")
         })
     }
 
@@ -539,7 +171,7 @@ fn download_url(timeout: u64, job: DownloadJob) -> DownloadResult {
             .context(format!("Failed to set URL: {}", job.url))?;
         easy.timeout(std::time::Duration::from_secs(timeout))
             .context("Failed to set timeout")?;
-        easy.useragent("Mozilla/5.0 (compatible; nft-void/0.1.0)")
+        easy.useragent("Mozilla/5.0 (compatible; zuul/0.1.0)")
             .context("Failed to set user agent")?;
         easy.follow_location(true)
             .context("Failed to enable follow location")?;
@@ -598,7 +230,7 @@ fn start_downloads(
     rx
 }
 
-fn generate_abuselist_urls(entries: &[String], tmpl_urls: &[String]) -> Vec<IStr> {
+fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -> Vec<IStr> {
     let mut urls = Vec::with_capacity(entries.len() * tmpl_urls.len().max(1));
 
     for entry in entries {
@@ -633,7 +265,7 @@ fn generate_abuselist_urls(entries: &[String], tmpl_urls: &[String]) -> Vec<IStr
             urls.extend(
                 tmpl_urls
                     .iter()
-                    .map(|tmpl| IStr::from(tmpl.replace("{asn}", digits))),
+                    .map(|tmpl| IStr::from(tmpl.as_ref().replace("{asn}", digits))),
             );
         } else {
             warn!(
@@ -646,14 +278,14 @@ fn generate_abuselist_urls(entries: &[String], tmpl_urls: &[String]) -> Vec<IStr
     urls
 }
 
-fn generate_country_urls(countries: &[String], tmpl_urls: &[String]) -> Vec<IStr> {
+fn generate_country_urls<S: AsRef<str>>(countries: &[String], tmpl_urls: &[S]) -> Vec<IStr> {
     countries
         .iter()
         .map(|country| country.to_lowercase())
         .flat_map(|country_lower| {
             tmpl_urls
                 .iter()
-                .map(move |tmpl| IStr::from(tmpl.replace("{country}", &country_lower)))
+                .map(move |tmpl| IStr::from(tmpl.as_ref().replace("{country}", &country_lower)))
         })
         .collect()
 }
@@ -665,8 +297,8 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     let mut jinja = minijinja::Environment::new();
     jinja.set_trim_blocks(true);
     jinja.set_lstrip_blocks(true);
-    jinja.add_template("nft-void", &template_content)?;
-    let template = jinja.get_template("nft-void")?;
+    jinja.add_template("zuul", &template_content)?;
+    let template = jinja.get_template("zuul")?;
 
     let mut set_data = HashMap::with_capacity(8);
     let cfg = &context.config;
@@ -817,22 +449,6 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
     sets
 }
 
-fn get_default_interface() -> Option<String> {
-    fs::read_to_string("/proc/net/route")
-        .ok()?
-        .lines()
-        .skip(1)
-        .find_map(|line| {
-            let mut parts = line.split_whitespace();
-            let first = parts.next()?;
-            if parts.next()? == "00000000" {
-                Some(first.to_owned())
-            } else {
-                None
-            }
-        })
-}
-
 fn run_nft_cli(args: &[&str], dry_run: bool) -> Result<Output> {
     if dry_run {
         debug!("Mocking nft command: nft {}", args.join(" "));
@@ -925,7 +541,7 @@ fn calculate_totals(sets: &IpSets) -> (usize, usize) {
 }
 
 fn start(context: &AppContext) -> Result<()> {
-    info!("Starting nft-void");
+    info!("Starting zuul");
     let sets = collect_ip_sets(context);
     let rules = generate_nftable(context, &sets)?;
 
@@ -938,7 +554,7 @@ fn start(context: &AppContext) -> Result<()> {
 }
 
 fn stop() -> Result<()> {
-    info!("Stopping nft-void");
+    info!("Stopping zuul");
     run_nft_cli(&["delete", "table", "netdev", "blackhole"], false)?;
     info!("Successfully deleted nftables table 'netdev blackhole'");
 
@@ -1050,12 +666,15 @@ fn main() -> Result<()> {
             .init();
     }
 
-    let mut config = Config::load(&cli.config)?;
+    let config_path = resolve_fragment(cli.config, "config.yaml")?;
+    let template_path = resolve_fragment(cli.template, "template.jinja2")?;
+
+    let mut config = Config::load(&config_path)?;
 
     if let Some(ref iifname) = config.iifname {
         info!("Using network interface: {}", iifname);
     } else {
-        config.iifname = Some("eth0".to_owned());
+        config.iifname = Some(Cow::Borrowed("eth0"));
         warn!("Using fallback interface eth0");
     }
 
@@ -1073,7 +692,7 @@ fn main() -> Result<()> {
 
     let context = AppContext {
         config,
-        template: cli.template,
+        template: template_path,
         timeout: cli.timeout,
         threads: cli.threads,
         verbosity: cli.verbose,
@@ -1083,7 +702,7 @@ fn main() -> Result<()> {
 
     match &cli.action {
         Action::Config => {
-            println!("{}", context.config);
+            println!("{:#?}", context.config);
         }
         Action::Start { .. } => {
             start(&context)?;

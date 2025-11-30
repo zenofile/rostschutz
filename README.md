@@ -1,4 +1,4 @@
-# nft-void
+# zuul
 
 A high-performance utility for managing nftables-based IP blocklists with support for country-based filtering and abuse list integration.
 
@@ -21,11 +21,11 @@ A high-performance utility for managing nftables-based IP blocklists with suppor
 
 ```cli
 cargo build --release
-cp target/release/nft-void /usr/local/bin/
-mkdir -p /usr/local/etc/nft-void/
-cp config.yaml template.jinja2 /usr/local/etc/nft-void/
-cp -r nft-void-.service.d /etc/systemd/system/
-cp nft-void-main.service nft-void-refresh.{service,timer} /etc/systemd/system/
+cp target/release/zuul /usr/local/bin/
+mkdir -p /usr/local/etc/zuul/
+cp config.yaml template.jinja2 /usr/local/etc/zuul/
+cp -r zuul-.service.d /etc/systemd/system/
+cp zuul-main.service zuul-refresh.{service,timer} /etc/systemd/system/
 systemctl daemon-reload
 ```
 
@@ -37,12 +37,12 @@ Edit `config.yaml` to configure IP versions, block policies, whitelists, blackli
 ## Usage
 
 ```log
-Usage: nft-void [OPTIONS] --config <CONFIG> --template <TEMPLATE> <COMMAND>
+Usage: zuul [OPTIONS] --config <CONFIG> --template <TEMPLATE> <COMMAND>
 
 Commands:
-  start    Start nft-void and create firewall rules
-  stop     Stop nft-void and remove firewall rules
-  restart  Restart nft-void (stop then start)
+  start    Start zuul and create firewall rules
+  stop     Stop zuul and remove firewall rules
+  restart  Restart zuul (stop then start)
   refresh  Update lists
   config   Display current configuration
   help     Print this message or the help of the given subcommand(s)
@@ -62,8 +62,8 @@ Options:
 Enable automatic updates with the included systemd units:
 
 ```cli
-systemctl enable --now nft-void-main.service
-systemctl enable --now nft-void-refresh.timer
+systemctl enable --now zuul-main.service
+systemctl enable --now zuul-refresh.timer
 ```
 
 The timer refreshes abuse and country lists at configured intervals.
