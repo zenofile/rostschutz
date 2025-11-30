@@ -6,6 +6,9 @@ mod config;
 mod istr;
 mod threadpool;
 
+#[cfg(feature = "sandbox")]
+mod sandbox;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -13,7 +16,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeSet, HashMap},
     fs,
-    io::Write,
+    io::{IsTerminal, Write},
     path::PathBuf,
     process::{Command, Output},
     sync::Arc,
@@ -653,21 +656,32 @@ fn main() -> Result<()> {
     if std::env::var("JOURNAL_STREAM").is_ok() {
         let journald_layer = tracing_journald::layer().expect("Failed to connect to journald");
 
+        // journald
         tracing_subscriber::registry()
             .with(tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into()))
             .with(journald_layer)
             .init();
     } else {
+        // tty
+        let use_ansi = std::io::stdout().is_terminal();
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into()),
             )
             .with_writer(std::io::stderr)
+            .with_ansi(use_ansi)
             .init();
     }
 
     let config_path = resolve_fragment(cli.config, "config.yaml")?;
     let template_path = resolve_fragment(cli.template, "template.jinja2")?;
+
+    // Landlock init
+    #[cfg(feature = "sandbox")]
+    if let Err(e) = sandbox::harden([&config_path, &template_path]) {
+        error!("Fatal: Failed to initialize sandbox: {:#}", e);
+        std::process::exit(1);
+    }
 
     let mut config = Config::load(&config_path)?;
 

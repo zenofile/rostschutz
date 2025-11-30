@@ -20,6 +20,7 @@ clap = { version = "4", features = ["derive"] }
 curl = { version = "0.4" }
 ipnet = "2"
 kanal = { version = "0.1", default-features = false }
+landlock = { version = "0.4", optional = true }
 minijinja = { version = "2", default-features = false, features = ["serde"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
@@ -30,7 +31,9 @@ tracing-journald = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
+default = ["sandbox"]
 static = ["curl/static-curl", "curl/rustls"]
+sandbox = ["dep:landlock"]
 
 [profile.dev]
 incremental = true
