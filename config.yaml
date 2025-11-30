@@ -19,13 +19,13 @@
 #   abuselist: abuselist
 #   country: country
 
-
 ## Logging configuration
-## enable: Turn logging on or off (true/false)
+## enable: Logging state 
 ## rate: Packet rate limit (packets/minute)
 ## burst: Packet burst limit
 # LOGGING:
-#   enabled: true
+#   enabled: yes
+#   ratelimiting: yes
 #   rate: 10
 #   burst: 5
 

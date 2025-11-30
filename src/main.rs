@@ -74,6 +74,8 @@ enum Action {
 struct LogConfig {
     #[serde(default = "default_log_enabled")]
     enabled: bool,
+    #[serde(default = "default_log_enabled")]
+    ratelimiting: bool,
     #[serde(default = "default_log_rate")]
     rate: u64,
     #[serde(default = "default_log_burst")]
@@ -81,6 +83,9 @@ struct LogConfig {
 }
 
 const fn default_log_enabled() -> bool {
+    true
+}
+const fn default_log_ratelimiting() -> bool {
     true
 }
 const fn default_log_rate() -> u64 {
@@ -94,6 +99,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             enabled: default_log_enabled(),
+            ratelimiting: default_log_ratelimiting(),
             rate: default_log_rate(),
             burst: default_log_burst(),
         }
@@ -390,17 +396,7 @@ impl std::fmt::Display for Config {
         writeln!(f, "SET_NAMES: {:?}", self.set_names)?;
         writeln!(f, "DEFAULT_POLICY: {}", self.default_policy)?;
         writeln!(f, "BLOCK_POLICY: {}", self.block_policy)?;
-
-        if self.logging.enabled {
-            writeln!(
-                f,
-                "LOGGING: enabled (rate: {}/min, burst: {})",
-                self.logging.rate, self.logging.burst
-            )?;
-        } else {
-            writeln!(f, "LOGGING: disabled")?;
-        }
-
+        writeln!(f, "LOGGING: {:?}", self.logging)?;
         writeln!(f, "SOURCES: {:?}", self.sources)?;
         writeln!(f, "IIFNAME: {:?}", self.iifname)?;
         writeln!(f, "WHITELIST: {:?}", self.whitelist)?;
@@ -609,7 +605,7 @@ fn start_downloads(
     rx
 }
 
-fn generate_abuselist_urls(entries: &[String], template: Option<&str>) -> Vec<IStr> {
+fn generate_abuselist_urls(entries: &[String], tpl: Option<&str>) -> Vec<IStr> {
     let mut urls = Vec::new();
     let mut asn_urls = Vec::new();
 
@@ -622,7 +618,7 @@ fn generate_abuselist_urls(entries: &[String], template: Option<&str>) -> Vec<IS
             let digits = &trimmed[2..];
 
             if digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
-                if let Some(tmpl) = template {
+                if let Some(tmpl) = tpl {
                     info!("Processing ASN entry: AS{}", digits);
                     let asn_url = tmpl.replace("{asn}", digits);
                     asn_urls.push(IStr::from(asn_url));
@@ -653,11 +649,11 @@ fn generate_abuselist_urls(entries: &[String], template: Option<&str>) -> Vec<IS
 }
 
 #[inline]
-fn generate_country_urls(countries: &[String], template: &str) -> Vec<IStr> {
+fn generate_country_urls(countries: &[String], tpl: &str) -> Vec<IStr> {
     #[allow(clippy::literal_string_with_formatting_args)]
     countries
         .iter()
-        .map(|country| IStr::from(template.replace("{country}", &country.to_lowercase())))
+        .map(|country| IStr::from(tpl.replace("{country}", &country.to_lowercase())))
         .collect()
 }
 
@@ -665,11 +661,11 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     let template_content =
         fs::read_to_string(&context.template).context("Failed to read template file")?;
 
-    let mut env = minijinja::Environment::new();
-    env.set_trim_blocks(true);
-    env.set_lstrip_blocks(true);
-    env.add_template("nft-void", &template_content)?;
-    let template = env.get_template("nft-void")?;
+    let mut jinja = minijinja::Environment::new();
+    jinja.set_trim_blocks(true);
+    jinja.set_lstrip_blocks(true);
+    jinja.add_template("nft-void", &template_content)?;
+    let template = jinja.get_template("nft-void")?;
 
     let mut set_data = HashMap::with_capacity(8);
     let cfg = &context.config;
