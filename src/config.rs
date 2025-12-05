@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashMap, fs, path::PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 macro_rules! skip_fmt {
     ($($i:item)*) => { $($i)* };
@@ -252,8 +252,12 @@ pub struct Config {
     pub default_policy: CowS,
     #[serde(rename = "BLOCK_POLICY", default = "default_drop")]
     pub block_policy: CowS,
-    #[serde(rename = "IIFNAME", default = "get_default_interface")]
-    pub iifname: Option<CowS>,
+    #[serde(
+        rename = "IIFNAME",
+        default,
+        deserialize_with = "deserialize_one_or_many"
+    )]
+    pub iifname: Vec<CowS>,
     #[serde(rename = "SET_NAMES", default)]
     pub set_names: SetNames,
     #[serde(rename = "LOGGING", default)]
@@ -275,11 +279,21 @@ impl Config {
         info!("Loading config from: {}", path.display());
         let content = fs::read_to_string(path)
             .context(format!("Failed to read config file: {}", path.display()))?;
-        let config: Self =
+        let mut config: Self =
             serde_saphyr::from_str(&content).context("Failed to parse YAML configuration")?;
 
         if !config.ip_versions.v4 && !config.ip_versions.v6 {
             anyhow::bail!("At least one IP version (v4 or v6) must be enabled");
+        }
+
+        if config.iifname.is_empty() {
+            if let Some(def) = get_default_interface() {
+                info!("Determined default interface: {}", def);
+                config.iifname.push(def);
+            } else {
+                warn!("No interface specified and no default route found. Using fallback 'eth0'");
+                config.iifname.push(Cow::Borrowed("eth0"));
+            }
         }
         Ok(config)
     }

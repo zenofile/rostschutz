@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::{
-    borrow::Cow,
     collections::{BTreeSet, HashMap},
     fs,
     io::{IsTerminal, Write},
@@ -329,7 +328,7 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     use minijinja::context;
 
     let rules = template.render(context! {
-        iifname => cfg.iifname.as_deref().unwrap(),
+        iifname => &cfg.iifname,
         default_policy => &cfg.default_policy,
         block_policy => &cfg.block_policy,
         logging => &cfg.logging,
@@ -683,13 +682,10 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let mut config = Config::load(&config_path)?;
+    let config = Config::load(&config_path)?;
 
-    if let Some(ref iifname) = config.iifname {
-        info!("Using network interface: {}", iifname);
-    } else {
-        config.iifname = Some(Cow::Borrowed("eth0"));
-        warn!("Using fallback interface eth0");
+    for iface in &config.iifname {
+        info!("Using network interface: {}", iface);
     }
 
     let print_stdout = match &cli.action {
