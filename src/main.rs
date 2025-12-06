@@ -568,30 +568,17 @@ fn refresh(context: &AppContext) -> Result<()> {
 
     info!("Reloading abuselist and country lists");
 
-    let mut flush_commands = String::with_capacity(512);
-
+    let mut commands = String::with_capacity(8192);
     let cfg = &context.config;
+
     for ip_version in cfg.ip_versions.get_active() {
         let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
         let country_set = format!("{}_{}", cfg.set_names.country, ip_version);
 
-        writeln!(
-            flush_commands,
-            "flush set netdev blackhole {}",
-            abuselist_set
-        )?;
-        writeln!(flush_commands, "flush set netdev blackhole {}", country_set)?;
+        writeln!(commands, "flush set netdev blackhole {}", abuselist_set)?;
+        writeln!(commands, "flush set netdev blackhole {}", country_set)?;
     }
-
-    if context.print_stdout {
-        write_to_stdout(&flush_commands)?;
-    }
-    run_nft_stdin(&flush_commands, context.dry_run)?;
-    info!("Flushed ABUSELIST and COUNTRY_LIST sets");
-
     let sets = collect_ip_sets(context);
-
-    let mut add_commands = String::with_capacity(4096);
 
     for ip_version in cfg.ip_versions.get_active() {
         let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
@@ -603,7 +590,7 @@ fn refresh(context: &AppContext) -> Result<()> {
             && !elements.is_empty()
         {
             writeln!(
-                add_commands,
+                commands,
                 "add element netdev blackhole {} {{ {} }}",
                 abuselist_set, elements
             )?;
@@ -615,18 +602,18 @@ fn refresh(context: &AppContext) -> Result<()> {
             && !elements.is_empty()
         {
             writeln!(
-                add_commands,
+                commands,
                 "add element netdev blackhole {} {{ {} }}",
                 country_set, elements
             )?;
         }
     }
 
-    if !add_commands.is_empty() {
+    if !commands.is_empty() {
         if context.print_stdout {
-            write_to_stdout(&add_commands)?;
+            write_to_stdout(&commands)?;
         }
-        run_nft_stdin(&add_commands, context.dry_run)?;
+        run_nft_stdin(&commands, context.dry_run)?;
     }
 
     let (total_v4, total_v6) = calculate_totals(&sets);
