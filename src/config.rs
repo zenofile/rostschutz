@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2025 zenofile <zenofile-sf6@unsha.re>
 
+use std::{borrow::Cow, collections::HashMap, fs, path::PathBuf};
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::HashMap, fs, path::PathBuf};
 use tracing::{debug, info, warn};
 
 macro_rules! skip_fmt {

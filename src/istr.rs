@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2025 zenofile <zenofile-sf6@unsha.re>
 
-use crate::config::CowS;
 use std::sync::Arc;
+
+use crate::config::CowS;
 
 /// Immutable String (wrapper around Arc<str>)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -67,8 +68,9 @@ impl From<CowS> for IStr {
 
 mod serde_impls {
     // Import parents to access IStr and other types
-    use super::IStr;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::IStr;
 
     impl Serialize for IStr {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

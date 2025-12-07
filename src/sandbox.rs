@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2025 zenofile <zenofile-sf6@unsha.re>
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, Compatible, NetPort, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
 };
-use std::path::Path;
 use tracing::{info, warn};
 
 /// The enforcement status of the sandbox.
@@ -46,6 +47,7 @@ where
     let sys_paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64"];
     let config_paths = [
         "/etc",
+        "/usr/local/etc",
         "/proc/net/route",
         "/proc/self",
         "/dev/urandom",

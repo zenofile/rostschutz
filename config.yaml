@@ -70,6 +70,7 @@ ABUSELIST:
     - https://iplists.firehol.org/files/bi_any_0_1d.ipset
     - https://iplists.firehol.org/files/haley_ssh.ipset
     - https://iplists.firehol.org/files/firehol_level2.netset
+    - 'file:///home/strom/dev/projects/zuul/test/ipv4-test.netset'
   v6:
     - AS37963 #ALIBABA-CN-NET
     - AS45102 #ALIBABA-CN-NET

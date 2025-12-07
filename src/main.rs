@@ -12,10 +12,7 @@ mod threadpool;
 #[cfg(feature = "sandbox")]
 mod sandbox;
 
-use anyhow::{Context, Result};
-use clap::Parser;
 use core::hint::likely;
-use ipnet::{Ipv4Net, Ipv6Net};
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
@@ -25,6 +22,10 @@ use std::{
     process::{Command, Output},
     sync::Arc,
 };
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use ipnet::{Ipv4Net, Ipv6Net};
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::prelude::*;
 
@@ -34,6 +35,8 @@ use crate::{
     istr::IStr,
     threadpool::ThreadPool,
 };
+
+type NetSets<T> = HashMap<IStr, BTreeSet<T>>;
 
 #[derive(Debug)]
 struct AppContext {
@@ -46,7 +49,11 @@ struct AppContext {
     print_stdout: bool,
 }
 
-type NetSets<T> = HashMap<IStr, BTreeSet<T>>;
+#[derive(Debug, Clone)]
+pub enum UrlEntry {
+    Http(IStr),
+    File(IStr),
+}
 
 mod prefix_parser {
     use ipnet::{Ipv4Net, Ipv6Net};
@@ -284,6 +291,7 @@ fn download_url(timeout: u64, job: DownloadJob) -> DownloadResult {
     }
 
     let content = (|| -> Result<Vec<u8>> {
+        // Handle everything else (http{,s})
         let dst = RefCell::new(Vec::new());
         let mut easy = curl::easy::Easy::new();
 
@@ -356,7 +364,18 @@ fn start_downloads(
     rx
 }
 
-fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -> Vec<IStr> {
+fn process_local_files(urls: Vec<IStr>) -> impl Iterator<Item = DownloadResult> {
+    urls.into_iter().map(|url| {
+        let content = url.strip_prefix("file://").map_or_else(
+            || Err(anyhow::anyhow!("Not a file:// URL")),
+            |path| std::fs::read(path).map_err(anyhow::Error::from),
+        );
+
+        DownloadResult { url, content }
+    })
+}
+
+fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -> Vec<UrlEntry> {
     let mut urls = Vec::with_capacity(entries.len() * tmpl_urls.len().max(1));
 
     for entry in entries {
@@ -364,7 +383,12 @@ fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -
 
         // Direct URLs
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            urls.push(IStr::from(trimmed));
+            urls.push(UrlEntry::Http(IStr::from(trimmed)));
+            continue;
+        }
+
+        if trimmed.starts_with("file://") {
+            urls.push(UrlEntry::File(IStr::from(trimmed)));
             continue;
         }
 
@@ -381,7 +405,8 @@ fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -
 
             if tmpl_urls.is_empty() {
                 warn!(
-                    "Skipping ASN entry {} because no source URLs are configured for this IP version",
+                    "Skipping ASN entry {} because no source URLs are configured for this IP \
+                     version",
                     trimmed
                 );
                 continue;
@@ -391,7 +416,7 @@ fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -
             urls.extend(
                 tmpl_urls
                     .iter()
-                    .map(|tmpl| IStr::from(tmpl.as_ref().replace("{asn}", digits))),
+                    .map(|tmpl| UrlEntry::Http(IStr::from(tmpl.as_ref().replace("{asn}", digits)))),
             );
         } else {
             warn!(
@@ -474,7 +499,8 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
 
     // We map every URL to the target set name so we know where to put the data later
     let mut url_map: HashMap<IStr, (IStr, IpVersion)> = HashMap::new();
-    let mut all_urls = Vec::new();
+    let mut http_urls = Vec::new();
+    let mut file_urls = Vec::new();
 
     for ip_version in cfg.ip_versions.get_active() {
         // Direct ip entry processing
@@ -507,13 +533,18 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
                 continue;
             }
 
-            all_urls.extend(
-                generate_abuselist_urls(entries, asn_tmpl)
-                    .into_iter()
-                    .inspect(|url| {
+            for entry in generate_abuselist_urls(entries, asn_tmpl) {
+                match entry {
+                    UrlEntry::Http(url) => {
                         url_map.insert(url.clone(), (set_name.clone(), ip_version));
-                    }),
-            );
+                        http_urls.push(url);
+                    }
+                    UrlEntry::File(url) => {
+                        url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                        file_urls.push(url);
+                    }
+                }
+            }
         }
 
         // Country List
@@ -526,7 +557,7 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
                 continue;
             }
 
-            all_urls.extend(
+            http_urls.extend(
                 generate_country_urls(countries, country_tmpl)
                     .into_iter()
                     .inspect(|url| {
@@ -537,31 +568,31 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
     }
 
     // Start (consume) all downloads. Returns immediately with a receiver
-    let rx = start_downloads(pool, all_urls);
+    let rx = start_downloads(pool, http_urls);
 
-    // Iterate as they finish (this blocks only as needed)
-    for result in rx {
-        let text = match result.content {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("Failed to download {}: {}", result.url, e);
-                continue;
+    let mut process_result = |result: DownloadResult| {
+        if let Ok(text) = &result.content
+            && let Some((set_name, version)) = url_map.remove(&result.url)
+        {
+            if context.verbosity >= 2 {
+                #[allow(clippy::naive_bytecount)]
+                let count = text.iter().filter(|&&b| b == b'\n').count() + 1;
+                debug!("Processing {} lines for {}", count, set_name);
             }
-        };
-
-        let Some((set_name, version)) = url_map.remove(&result.url) else {
-            // Optionally log that a result arrived for an unknown/duplicate URL
-            continue;
-        };
-
-        // Computational expensive, debug mode only
-        if context.verbosity >= 2 {
-            // Skip unicode validation for line counting
-            #[allow(clippy::naive_bytecount)]
-            let count = text.iter().filter(|&&b| b == b'\n').count() + 1;
-            debug!("Processing {} lines for {}", count, set_name);
+            // Pass 'text' (which is &Vec<u8>) directly
+            sets.process_content(version, &set_name, (&result.url, text));
+        } else if let Err(e) = &result.content {
+            warn!("Failed to process {}: {}", result.url, e);
         }
-        sets.process_content(version, &set_name, (&result.url, &text));
+    };
+
+    for result in rx {
+        process_result(result);
+    }
+
+    // Process local files
+    for result in process_local_files(file_urls) {
+        process_result(result);
     }
 
     let (total_v4, total_v6) = calculate_totals(&sets);
@@ -788,7 +819,7 @@ fn main() -> Result<()> {
 
     // Landlock init
     #[cfg(feature = "sandbox")]
-    match sandbox::harden([&config_path, &template_path]) {
+    match sandbox::harden([&config_path, &template_path, &std::env::current_dir()?]) {
         Ok(sandbox::Status::Full) => info!("Landlock sandbox fully active."),
         Ok(status) if cli.enforce_sandbox => {
             anyhow::bail!("Fatal: Sandbox is enforced but status is: {}", status)
