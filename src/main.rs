@@ -31,7 +31,7 @@ use tracing_subscriber::prelude::*;
 
 use crate::{
     cli::{Action, Cli},
-    config::{Config, IpVersion, resolve_fragment},
+    config::{Config, IpVersion, ListEntry, resolve_fragment},
     istr::IStr,
     threadpool::ThreadPool,
 };
@@ -49,10 +49,12 @@ struct AppContext {
     print_stdout: bool,
 }
 
-#[derive(Debug, Clone)]
-pub enum UrlEntry {
-    Http(IStr),
-    File(IStr),
+// Maybe support per-URL min_prefixes in the future
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessingInput<'a> {
+    pub source: &'a str,
+    pub content: &'a [u8],
+    pub min_prefix: u8,
 }
 
 mod prefix_parser {
@@ -145,30 +147,28 @@ impl IpSets {
     fn process_ips<T, F>(
         target_map: &mut NetSets<T>,
         set_name: &str,
-        data: (&str, &[u8]),
+        input: ProcessingInput,
         parser: F,
-        min_prefix_len: u8,
     ) where
         T: Ord + Copy + std::fmt::Debug + cidr::PrefixCheck,
         F: Fn(&[u8]) -> ParsedResult<T>,
     {
-        let (url, content) = data;
-
         // Only trust direct entries fully
-        let trusted_set = url.starts_with("direct:");
+        let trusted_set = input.source.starts_with("direct:");
         let target_set = target_map.entry(IStr::from(set_name)).or_default();
 
         let mut added = 0;
         let mut invalid = 0;
 
         // Iterate over lines using byte splitting (zero allocation)
-        for line_bytes in content
+        for line_bytes in input
+            .content
             .split(|&b| b == b'\n')
             .map(Self::strip_comment_and_trim_bytes)
             .filter(|s| !s.is_empty())
         {
             if let Some(net) = parser(line_bytes) {
-                if likely(trusted_set || net.meets_min_prefix(min_prefix_len)) {
+                if likely(trusted_set || net.meets_min_prefix(input.min_prefix)) {
                     if target_set.insert(net) {
                         added += 1;
                     }
@@ -188,29 +188,17 @@ impl IpSets {
             }
         }
 
-        Self::log_results(set_name, url, added, invalid);
+        Self::log_results(set_name, input.source, added, invalid);
     }
 
     #[inline]
-    fn process_content(&mut self, version: IpVersion, set_name: &str, data: (&str, &[u8])) {
+    fn process_content(&mut self, version: IpVersion, set_name: &str, input: ProcessingInput) {
         match version {
             IpVersion::V4 => {
-                Self::process_ips(
-                    &mut self.v4_sets,
-                    set_name,
-                    data,
-                    parse_v4_net_bytes,
-                    <Ipv4Net as cidr::PrefixCheck>::MIN_PREFIX_LEN_V4,
-                );
+                Self::process_ips(&mut self.v4_sets, set_name, input, parse_v4_net_bytes);
             }
             IpVersion::V6 => {
-                Self::process_ips(
-                    &mut self.v6_sets,
-                    set_name,
-                    data,
-                    parse_v6_net_bytes,
-                    <Ipv4Net as cidr::PrefixCheck>::MIN_PREFIX_LEN_V6,
-                );
+                Self::process_ips(&mut self.v6_sets, set_name, input, parse_v6_net_bytes);
             }
         }
     }
@@ -375,20 +363,33 @@ fn process_local_files(urls: Vec<IStr>) -> impl Iterator<Item = DownloadResult> 
     })
 }
 
-fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -> Vec<UrlEntry> {
+#[derive(Debug, Clone)]
+pub enum UrlEntry {
+    Http { url: IStr, min_prefix: Option<u8> },
+    File { path: IStr, min_prefix: Option<u8> },
+}
+
+fn generate_abuselist_urls<S: AsRef<str>>(entries: &[ListEntry], tmpl_urls: &[S]) -> Vec<UrlEntry> {
     let mut urls = Vec::with_capacity(entries.len() * tmpl_urls.len().max(1));
 
     for entry in entries {
-        let trimmed = entry.trim();
+        let (raw_str, custom_prefix) = entry.as_parts();
+        let trimmed = raw_str.trim();
 
         // Direct URLs
-        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            urls.push(UrlEntry::Http(IStr::from(trimmed)));
+        if trimmed.starts_with("https://") {
+            urls.push(UrlEntry::Http {
+                url: IStr::from(trimmed),
+                min_prefix: custom_prefix,
+            });
             continue;
         }
 
         if trimmed.starts_with("file://") {
-            urls.push(UrlEntry::File(IStr::from(trimmed)));
+            urls.push(UrlEntry::File {
+                path: IStr::from(trimmed),
+                min_prefix: custom_prefix,
+            });
             continue;
         }
 
@@ -413,11 +414,10 @@ fn generate_abuselist_urls<S: AsRef<str>>(entries: &[String], tmpl_urls: &[S]) -
             }
 
             info!("Processing ASN entry: AS{}", digits);
-            urls.extend(
-                tmpl_urls
-                    .iter()
-                    .map(|tmpl| UrlEntry::Http(IStr::from(tmpl.as_ref().replace("{asn}", digits)))),
-            );
+            urls.extend(tmpl_urls.iter().map(|tmpl| UrlEntry::Http {
+                url: IStr::from(tmpl.as_ref().replace("{asn}", digits)),
+                min_prefix: custom_prefix,
+            }));
         } else {
             warn!(
                 "Ignoring entry with unknown format in abuselist: {}",
@@ -463,7 +463,7 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     ];
 
     // ... with ip version appended
-    set_data.extend(cfg.ip_versions.get_active().flat_map(|ip_version| {
+    set_data.extend(cfg.net.get_active().flat_map(|ip_version| {
         base_set_names.iter().map(move |base_name| {
             let full_name = format!("{}_{}", base_name, ip_version);
             let nets = sets
@@ -484,8 +484,8 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
         set_names => &cfg.set_names,
         sets => set_data,
         ip_versions => context! {
-            v4 => cfg.ip_versions.v4,
-            v6 => cfg.ip_versions.v6,
+            v4 => cfg.net.v4.enabled,
+            v6 => cfg.net.v6.enabled,
         },
     })?;
 
@@ -498,31 +498,52 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
     let pool = Arc::new(ThreadPool::downloader(context.threads, context.timeout));
 
     // We map every URL to the target set name so we know where to put the data later
-    let mut url_map: HashMap<IStr, (IStr, IpVersion)> = HashMap::new();
+    let mut url_map: HashMap<IStr, (IStr, IpVersion, Option<u8>)> = HashMap::new();
     let mut http_urls = Vec::new();
     let mut file_urls = Vec::new();
 
-    for ip_version in cfg.ip_versions.get_active() {
+    for ip_version in cfg.net.get_active() {
+        let min_prefix = match ip_version {
+            IpVersion::V4 => cfg.net.v4.min_prefix,
+            IpVersion::V6 => cfg.net.v6.min_prefix,
+        };
+
         // Direct ip entry processing
         // Whitelist
         if let Some(entries) = cfg.whitelist.as_ref().and_then(|m| m.get(&ip_version)) {
             let set_name = format!("{}_{}", cfg.set_names.whitelist, ip_version);
-            let nets = entries.join("\n");
-            let src = "direct:WHITELIST";
+            let nets = entries
+                .iter()
+                .map(|e| e.as_parts().0)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let input = ProcessingInput {
+                source: "direct:WHITELIST",
+                content: nets.as_bytes(),
+                min_prefix,
+            };
 
-            sets.process_content(ip_version, &set_name, (src, nets.as_bytes()));
+            sets.process_content(ip_version, &set_name, input);
         }
 
         // Blacklist
         if let Some(entries) = cfg.blacklist.as_ref().and_then(|m| m.get(&ip_version)) {
             let set_name = format!("{}_{}", cfg.set_names.blacklist, ip_version);
-            let nets = entries.join("\n");
-            let src = "direct:BLACKLIST";
+            let nets = entries
+                .iter()
+                .map(|e| e.as_parts().0)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let input = ProcessingInput {
+                source: "direct:BLACKLIST",
+                content: nets.as_bytes(),
+                min_prefix,
+            };
 
-            sets.process_content(ip_version, &set_name, (src, nets.as_bytes()));
+            sets.process_content(ip_version, &set_name, input);
         }
 
-        // Handle remote content
+        // Prepare retrieval of remote content
         // Abuselist
         if let Some(entries) = cfg.abuselist.as_ref().and_then(|m| m.get(&ip_version)) {
             let set_name = IStr::from(format!("{}_{}", cfg.set_names.abuselist, ip_version));
@@ -535,13 +556,13 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
 
             for entry in generate_abuselist_urls(entries, asn_tmpl) {
                 match entry {
-                    UrlEntry::Http(url) => {
-                        url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                    UrlEntry::Http { url, min_prefix } => {
+                        url_map.insert(url.clone(), (set_name.clone(), ip_version, min_prefix));
                         http_urls.push(url);
                     }
-                    UrlEntry::File(url) => {
-                        url_map.insert(url.clone(), (set_name.clone(), ip_version));
-                        file_urls.push(url);
+                    UrlEntry::File { path, min_prefix } => {
+                        url_map.insert(path.clone(), (set_name.clone(), ip_version, min_prefix));
+                        file_urls.push(path);
                     }
                 }
             }
@@ -561,7 +582,7 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
                 generate_country_urls(countries, country_tmpl)
                     .into_iter()
                     .inspect(|url| {
-                        url_map.insert(url.clone(), (set_name.clone(), ip_version));
+                        url_map.insert(url.clone(), (set_name.clone(), ip_version, None));
                     }),
             );
         }
@@ -572,15 +593,23 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
 
     let mut process_result = |result: DownloadResult| {
         if let Ok(text) = &result.content
-            && let Some((set_name, version)) = url_map.remove(&result.url)
+            && let Some((set_name, version, override_prefix)) = url_map.remove(&result.url)
         {
             if context.verbosity >= 2 {
                 #[allow(clippy::naive_bytecount)]
                 let count = text.iter().filter(|&&b| b == b'\n').count() + 1;
                 debug!("Processing {} lines for {}", count, set_name);
             }
-            // Pass 'text' (which is &Vec<u8>) directly
-            sets.process_content(version, &set_name, (&result.url, text));
+            let input = ProcessingInput {
+                source: &result.url,
+                content: text,
+                min_prefix: override_prefix.unwrap_or(match version {
+                    IpVersion::V4 => cfg.net.v4.min_prefix,
+                    IpVersion::V6 => cfg.net.v6.min_prefix,
+                }),
+            };
+
+            sets.process_content(version, &set_name, input);
         } else if let Err(e) = &result.content {
             warn!("Failed to process {}: {}", result.url, e);
         }
@@ -726,7 +755,7 @@ fn refresh(context: &AppContext) -> Result<()> {
     let mut commands = String::with_capacity(8192);
     let cfg = &context.config;
 
-    for ip_version in cfg.ip_versions.get_active() {
+    for ip_version in cfg.net.get_active() {
         let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
         let country_set = format!("{}_{}", cfg.set_names.country, ip_version);
 
@@ -735,7 +764,7 @@ fn refresh(context: &AppContext) -> Result<()> {
     }
     let sets = collect_ip_sets(context);
 
-    for ip_version in cfg.ip_versions.get_active() {
+    for ip_version in cfg.net.get_active() {
         let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
         let country_set = format!("{}_{}", cfg.set_names.country, ip_version);
 
@@ -1021,6 +1050,7 @@ mod tests {
         assert_eq!(out, b"192.168.0.0/16");
     }
 
+    const MIN_PREFIX_LEN: u8 = 0;
     // Tests for process_ips
     #[test]
     fn process_ips_inserts_valid_and_skips_invalid() {
@@ -1032,8 +1062,13 @@ mod tests {
         //  "bad"   -> invalid
         //  "2"     -> duplicate (should not increase set size)
         let content = b"1\n2\nbad\n2\n";
-        let url = "memory://test";
-        IpSets::process_ips(&mut map, "test-set", (url, content), parse_u32_bytes, 0);
+        let source = "memory://test";
+        let input = ProcessingInput {
+            source,
+            content,
+            min_prefix: MIN_PREFIX_LEN,
+        };
+        IpSets::process_ips(&mut map, "test-set", input, parse_u32_bytes);
         let set = map.get("test-set").expect("set should exist");
         // Valid unique entries: {1, 2}
         assert_eq!(set.len(), 2);
@@ -1045,10 +1080,15 @@ mod tests {
     fn process_ips_creates_set_if_missing() {
         let mut map = NetSets::<u32>::default();
         let content = b"42\n";
-        let url = "memory://test";
+        let source = "memory://test";
         assert!(!map.contains_key("new-set"));
 
-        IpSets::process_ips(&mut map, "new-set", (url, content), parse_u32_bytes, 0);
+        let input = ProcessingInput {
+            source,
+            content,
+            min_prefix: MIN_PREFIX_LEN,
+        };
+        IpSets::process_ips(&mut map, "new-set", input, parse_u32_bytes);
         let set = map.get("new-set").expect("set should have been created");
         assert_eq!(set.len(), 1);
         assert!(set.contains(&42));
@@ -1058,8 +1098,13 @@ mod tests {
     fn process_ips_ignores_blank_and_comment_lines() {
         let mut map = NetSets::<u32>::default();
         let content = b"\n# full comment\n  \t # comment with leading ws\n7\n";
-        let url = "memory://test";
-        IpSets::process_ips(&mut map, "comments", (url, content), parse_u32_bytes, 0);
+        let source = "memory://test";
+        let input = ProcessingInput {
+            source,
+            content,
+            min_prefix: MIN_PREFIX_LEN,
+        };
+        IpSets::process_ips(&mut map, "comments", input, parse_u32_bytes);
         let set = map.get("comments").expect("set should exist");
         assert_eq!(set.len(), 1);
         assert!(set.contains(&7));
@@ -1107,10 +1152,18 @@ mod tests {
     fn get_formatted_dispatches_on_version() {
         let mut sets = IpSets::new();
         // Feed content through the real pipeline so the correct net types are used.
-        let v4_data = ("memory://v4", b"10.0.0.0/8\n" as &[u8]);
-        let v6_data = ("memory://v6", b"fd00::/24\n" as &[u8]);
-        sets.process_content(IpVersion::V4, "test", v4_data);
-        sets.process_content(IpVersion::V6, "test", v6_data);
+        let v4_input = ProcessingInput {
+            source: "memory://v4",
+            content: b"10.0.0.0/8\n",
+            min_prefix: MIN_PREFIX_LEN,
+        };
+        let v6_input = ProcessingInput {
+            source: "memory://v6",
+            content: b"fd00::/24\n",
+            min_prefix: MIN_PREFIX_LEN,
+        };
+        sets.process_content(IpVersion::V4, "test", v4_input);
+        sets.process_content(IpVersion::V6, "test", v6_input);
         let v4_str = sets
             .get_formatted(IpVersion::V4, "test")
             .expect("v4 set should exist");

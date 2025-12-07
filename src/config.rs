@@ -12,7 +12,7 @@ macro_rules! skip_fmt {
 }
 
 pub type CowS = Cow<'static, str>;
-pub type MaybeIPList = Option<HashMap<IpVersion, Vec<String>>>;
+pub type MaybeIPList = Option<HashMap<IpVersion, Vec<ListEntry>>>;
 
 pub fn resolve_fragment(user_path: Option<String>, filename: &str) -> Result<PathBuf> {
     if let Some(path) = user_path {
@@ -81,6 +81,25 @@ where
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ListEntry {
+    /// Supports the legacy format: - "<https://example.com/list.ip>"
+    Simple(String),
+    /// Supports the new format:    - { `url`: "...", `min_prefix`: 24 }
+    Detailed { url: String, min_prefix: Option<u8> },
+}
+
+// Helper to extract data regardless of format
+impl ListEntry {
+    pub fn as_parts(&self) -> (&str, Option<u8>) {
+        match self {
+            Self::Simple(s) => (s, None),
+            Self::Detailed { url, min_prefix } => (url, *min_prefix),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IpVersion {
@@ -105,23 +124,59 @@ impl std::fmt::Display for IpVersion {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct IpVersions {
-    pub v4: bool,
-    pub v6: bool,
+skip_fmt! {
+    const fn default_true() -> bool { true }
+    const fn default_min_prefix_v4() -> u8 { 8 }
+    const fn default_min_prefix_v6() -> u8 { 16 }
 }
 
-impl IpVersions {
-    pub fn get_active(&self) -> impl Iterator<Item = IpVersion> {
-        let v4 = self.v4.then_some(IpVersion::V4);
-        let v6 = self.v6.then_some(IpVersion::V6);
-        v4.into_iter().chain(v6)
+#[derive(Debug, Deserialize, Clone)]
+pub struct Ipv4Conf {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_min_prefix_v4")]
+    pub min_prefix: u8,
+}
+
+impl Default for Ipv4Conf {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_prefix: default_min_prefix_v4(),
+        }
     }
 }
 
-impl Default for IpVersions {
+#[derive(Debug, Deserialize, Clone)]
+pub struct Ipv6Conf {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_min_prefix_v6")]
+    pub min_prefix: u8,
+}
+
+impl Default for Ipv6Conf {
     fn default() -> Self {
-        Self { v4: true, v6: true }
+        Self {
+            enabled: true,
+            min_prefix: default_min_prefix_v6(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct IpConfigs {
+    #[serde(default)]
+    pub v4: Ipv4Conf,
+    #[serde(default)]
+    pub v6: Ipv6Conf,
+}
+
+impl IpConfigs {
+    pub fn get_active(&self) -> impl Iterator<Item = IpVersion> {
+        let v4 = self.v4.enabled.then_some(IpVersion::V4);
+        let v6 = self.v6.enabled.then_some(IpVersion::V6);
+        v4.into_iter().chain(v6)
     }
 }
 
@@ -247,8 +302,8 @@ impl Default for SetNames {
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    #[serde(rename = "IP_VERSIONS", default)]
-    pub ip_versions: IpVersions,
+    #[serde(rename = "NET", default)]
+    pub net: IpConfigs,
     #[serde(rename = "DEFAULT_POLICY", default = "default_accept")]
     pub default_policy: CowS,
     #[serde(rename = "BLOCK_POLICY", default = "default_drop")]
@@ -283,7 +338,7 @@ impl Config {
         let mut config: Self =
             serde_saphyr::from_str(&content).context("Failed to parse YAML configuration")?;
 
-        if !config.ip_versions.v4 && !config.ip_versions.v6 {
+        if !config.net.v4.enabled && !config.net.v6.enabled {
             anyhow::bail!("At least one IP version (v4 or v6) must be enabled");
         }
 

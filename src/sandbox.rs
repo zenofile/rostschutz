@@ -54,7 +54,9 @@ where
         "/dev/zero",
     ];
     let write_paths = ["/dev/null"];
-    let allowed_ports = [80, 443, 53];
+
+    // DNS and HTTPS default ports
+    let allowed_ports = [53, 443];
 
     // Define
     let read_exec = AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;

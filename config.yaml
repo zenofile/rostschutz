@@ -1,7 +1,12 @@
-## IP versions supported: 'on' or 'off', default 'off'
-# IP_VERSIONS:
-#   v4: on
-#   v6: on
+## IP versions supported with allowed minimum CIDR prefix
+## Defaults: v4: 8, v6: 16
+# NET:
+#   v4:
+#     enabled: false
+#     min_prefix: 8
+#   v6:
+#     enabled: false
+#     min_prefix: 16
 
 ## Default chain policy
 # DEFAULT_POLICY: accept
@@ -65,14 +70,18 @@ BLACKLIST:
 # For example, with: https://iplists.firehol.org/
 ABUSELIST:
   v4:
-    - AS37963 #ALIBABA-CN-NET
+    # Supports ASNs
     - AS45102 #ALIBABA-CN-NET
+    # Remote lists with https:// scheme
     - https://iplists.firehol.org/files/bi_any_0_1d.ipset
     - https://iplists.firehol.org/files/haley_ssh.ipset
-    - https://iplists.firehol.org/files/firehol_level2.netset
-    - 'file:///home/strom/dev/projects/zuul/test/ipv4-test.netset'
+    # ...with min_prefix override
+    - url: https://iplists.firehol.org/files/firehol_level2.netset
+      min_prefix: 24
+      # Local files with file:// scheme
+    - url: file://test/ipv4-test.netset
+      min_prefix: 0
   v6:
-    - AS37963 #ALIBABA-CN-NET
     - AS45102 #ALIBABA-CN-NET
 
 ## Country list: two letter country codes defined in ISO 3166-1

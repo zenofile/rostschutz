@@ -92,7 +92,9 @@ fn parse_raw_prefix(bytes: &[u8], max: u8) -> Option<u8> {
 }
 
 pub trait PrefixCheck {
+    #[allow(dead_code)]
     const MIN_PREFIX_LEN_V4: u8 = 8;
+    #[allow(dead_code)]
     const MIN_PREFIX_LEN_V6: u8 = 16;
 
     fn meets_min_prefix(&self, min: u8) -> bool;
@@ -101,6 +103,7 @@ pub trait PrefixCheck {
 impl PrefixCheck for ipnet::Ipv4Net {
     #[inline]
     fn meets_min_prefix(&self, min: u8) -> bool {
+        assert!(min <= 32, "Minimum prefix for v4 <= 32");
         self.prefix_len() >= min
     }
 }
@@ -108,6 +111,7 @@ impl PrefixCheck for ipnet::Ipv4Net {
 impl PrefixCheck for ipnet::Ipv6Net {
     #[inline]
     fn meets_min_prefix(&self, min: u8) -> bool {
+        assert!(min <= 128, "Minimum prefix for v6 <= 128");
         self.prefix_len() >= min
     }
 }
