@@ -116,6 +116,149 @@ impl PrefixCheck for ipnet::Ipv6Net {
     }
 }
 
+mod prefix_parser {
+    use ipnet::{Ipv4Net, Ipv6Net};
+
+    use crate::cidr::{Ipv4Prefix, Ipv6Prefix};
+
+    pub type ParsedResult<T> = Option<T>;
+
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
+    pub fn parse_v4_net_bytes(input: &[u8]) -> ParsedResult<Ipv4Net> {
+        let (ip_bytes, prefix) = match input.split_once(|&b| b == b'/') {
+            Some((ip, p)) => (
+                ip,
+                Ipv4Prefix::try_from(p)
+                    .inspect_err(|e| tracing::warn!("Failed to parse v4 prefix: {:?}", e))
+                    .ok()?,
+            ),
+            // Default is /32 for IPv4
+            None => (input, Ipv4Prefix::new(32).unwrap()),
+        };
+
+        let ip = std::net::Ipv4Addr::parse_ascii(ip_bytes).ok()?;
+        let net = Ipv4Net::new(ip, prefix.as_u8()).unwrap();
+
+        Some(net)
+    }
+
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
+    pub fn parse_v6_net_bytes(input: &[u8]) -> ParsedResult<Ipv6Net> {
+        let (ip_bytes, prefix) = match input.split_once(|&b| b == b'/') {
+            Some((ip, p)) => (
+                ip,
+                Ipv6Prefix::try_from(p)
+                    .inspect_err(|e| tracing::warn!("Failed to parse v6 prefix: {:?}", e))
+                    .ok()?,
+            ),
+            // Default is /128 for IPv6
+            None => (input, Ipv6Prefix::new(128)?),
+        };
+
+        let ip = std::net::Ipv6Addr::parse_ascii(ip_bytes).ok()?;
+        let net = Ipv6Net::new(ip, prefix.as_u8()).unwrap();
+
+        Some(net)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        macro_rules! assert_v4 {
+            ($input:expr, $expected_ip:expr, $expected_prefix:expr) => {
+                let result = parse_v4_net_bytes($input).expect("Should parse valid v4");
+                assert_eq!(result.addr().to_string(), $expected_ip, "IP mismatch");
+                assert_eq!(result.prefix_len(), $expected_prefix, "Prefix mismatch");
+            };
+        }
+
+        macro_rules! assert_v6 {
+            ($input:expr, $expected_ip:expr, $expected_prefix:expr) => {
+                let result = parse_v6_net_bytes($input).expect("Should parse valid v6");
+                assert_eq!(result.addr().to_string(), $expected_ip, "IP mismatch");
+                assert_eq!(result.prefix_len(), $expected_prefix, "Prefix mismatch");
+            };
+        }
+
+        #[test]
+        fn test_parse_v4_with_explicit_prefix() {
+            // "192.168.1.10/24"
+            let input = b"192.168.1.10/24";
+            assert_v4!(input, "192.168.1.10", 24);
+        }
+
+        #[test]
+        fn test_parse_v4_defaults_to_32() {
+            // "10.0.0.1" -> Should become /32
+            let input = b"10.0.0.1";
+            assert_v4!(input, "10.0.0.1", 32);
+        }
+
+        #[test]
+        fn test_parse_v4_invalid_ip_returns_none() {
+            // Malformed IP
+            let input = b"999.999.999.999";
+            assert!(parse_v4_net_bytes(input).is_none());
+
+            // Garbage
+            let input = b"not-an-ip";
+            assert!(parse_v4_net_bytes(input).is_none());
+
+            // Empty
+            let input = b"";
+            assert!(parse_v4_net_bytes(input).is_none());
+        }
+
+        #[test]
+        fn test_parse_v4_invalid_prefix_returns_none() {
+            // Assuming Ipv4Prefix::try_from fails on > 32 or garbage
+            let input = b"192.168.1.1/33";
+            assert!(parse_v4_net_bytes(input).is_none());
+
+            let input = b"192.168.1.1/abc";
+            assert!(parse_v4_net_bytes(input).is_none());
+        }
+
+        #[test]
+        fn test_parse_v6_with_explicit_prefix() {
+            // "fd00::1/64"
+            let input = b"fd00::1/64";
+            assert_v6!(input, "fd00::1", 64);
+        }
+
+        #[test]
+        fn test_parse_v6_defaults_to_128() {
+            // "::1" -> Should become /128
+            let input = b"::1";
+            assert_v6!(input, "::1", 128);
+        }
+
+        #[test]
+        fn test_parse_v6_full_address() {
+            let input = b"2001:0db8:85a3:0000:0000:8a2e:0370:7334/64";
+            assert_v6!(input, "2001:db8:85a3::8a2e:370:7334", 64);
+        }
+
+        #[test]
+        fn test_parse_v6_invalid_ip_returns_none() {
+            let input = b"zz::1";
+            assert!(parse_v6_net_bytes(input).is_none());
+        }
+
+        #[test]
+        fn test_parse_v6_invalid_prefix_returns_none() {
+            // Assuming Ipv6Prefix::try_from fails on > 128
+            let input = b"fd00::1/129";
+            assert!(parse_v6_net_bytes(input).is_none());
+        }
+    }
+}
+
+pub use self::prefix_parser::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -30,13 +30,14 @@ use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::prelude::*;
 
 use crate::{
+    cidr::{ParsedResult, parse_v4_net_bytes, parse_v6_net_bytes},
     cli::{Action, Cli},
     config::{Config, IpVersion, ListEntry, resolve_fragment},
     istr::IStr,
     threadpool::ThreadPool,
 };
 
-type NetSets<T> = HashMap<IStr, BTreeSet<T>>;
+type NetSets<T> = HashMap<IStr, Arc<BTreeSet<T>>>;
 
 #[derive(Debug)]
 struct AppContext {
@@ -49,7 +50,6 @@ struct AppContext {
     print_stdout: bool,
 }
 
-// Maybe support per-URL min_prefixes in the future
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessingInput<'a> {
     pub source: &'a str,
@@ -57,55 +57,105 @@ pub struct ProcessingInput<'a> {
     pub min_prefix: u8,
 }
 
-mod prefix_parser {
-    use ipnet::{Ipv4Net, Ipv6Net};
+use std::fmt;
 
-    use crate::cidr::{Ipv4Prefix, Ipv6Prefix};
+#[derive(Debug, Clone)]
+struct LazyIpSet<T>(Arc<BTreeSet<T>>);
 
-    pub type ParsedResult<T> = Option<T>;
-
-    #[allow(clippy::missing_panics_doc)]
-    #[must_use]
-    pub fn parse_v4_net_bytes(input: &[u8]) -> ParsedResult<Ipv4Net> {
-        let (ip_bytes, prefix) = match input.split_once(|&b| b == b'/') {
-            Some((ip, p)) => (
-                ip,
-                Ipv4Prefix::try_from(p)
-                    .inspect_err(|e| tracing::warn!("Failed to parse v4 prefix: {:?}", e))
-                    .ok()?,
-            ),
-            // Default is /32 for IPv4
-            None => (input, Ipv4Prefix::new(32).unwrap()),
-        };
-
-        let ip = std::net::Ipv4Addr::parse_ascii(ip_bytes).ok()?;
-        let net = Ipv4Net::new(ip, prefix.as_u8()).unwrap();
-
-        Some(net)
-    }
-
-    #[allow(clippy::missing_panics_doc)]
-    #[must_use]
-    pub fn parse_v6_net_bytes(input: &[u8]) -> ParsedResult<Ipv6Net> {
-        let (ip_bytes, prefix) = match input.split_once(|&b| b == b'/') {
-            Some((ip, p)) => (
-                ip,
-                Ipv6Prefix::try_from(p)
-                    .inspect_err(|e| tracing::warn!("Failed to parse v6 prefix: {:?}", e))
-                    .ok()?,
-            ),
-            // Default is /128 for IPv6
-            None => (input, Ipv6Prefix::new(128)?),
-        };
-
-        let ip = std::net::Ipv6Addr::parse_ascii(ip_bytes).ok()?;
-        let net = Ipv6Net::new(ip, prefix.as_u8()).unwrap();
-
-        Some(net)
+impl<T> fmt::Display for LazyIpSet<T>
+where
+    T: fmt::Display + fmt::Debug + Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, net) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",\n\t\t")?;
+            }
+            write!(f, "{}", net)?;
+        }
+        Ok(())
     }
 }
 
-use prefix_parser::{ParsedResult, parse_v4_net_bytes, parse_v6_net_bytes};
+impl<T> minijinja::value::Object for LazyIpSet<T>
+where
+    T: fmt::Display + fmt::Debug + Send + Sync + 'static,
+{
+    // Override is_true so {% if sets.name %} works naturally.
+    // By default, Objects are always "true" unless they implement enumerator_len,
+    // which we don't. We want empty sets to be skipped in the template.
+    #[inline]
+    fn is_true(self: &Arc<Self>) -> bool {
+        !self.0.is_empty()
+    }
+
+    // Override render to force usage of our Display impl.
+    // Without this, Minijinja might treat this as an opaque struct/map
+    // and print a debug representation (like `{}`) instead of our formatted list.
+    #[inline]
+    fn render(self: &Arc<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SetType {
+    Static,
+    Dynamic,
+}
+
+#[derive(Debug)]
+struct SetProcessor<'a> {
+    cfg: &'a Config,
+    sets: &'a IpSets,
+}
+
+impl<'a> SetProcessor<'a> {
+    const fn new(cfg: &'a Config, sets: &'a IpSets) -> Self {
+        Self { cfg, sets }
+    }
+
+    /// Iterates over all active sets of the given type.
+    /// The callback receives: (IP Version, Set Name, `LazyIpSet` Object)
+    fn for_each_set<F>(&self, set_type: SetType, mut callback: F) -> Result<()>
+    where
+        F: FnMut(IpVersion, &str, &minijinja::value::Value) -> Result<()>,
+    {
+        let cfg = self.cfg;
+        let targets = match set_type {
+            SetType::Static => [&cfg.set_names.whitelist, &cfg.set_names.blacklist],
+            SetType::Dynamic => [&cfg.set_names.abuselist, &cfg.set_names.country],
+        };
+
+        for ip_version in cfg.net.get_active() {
+            for base_name in &targets {
+                let full_name = format!("{}_{}", base_name, ip_version);
+
+                // Retrieve the set as a Minijinja Value (wrapping LazyIpSet)
+                let val = match ip_version {
+                    IpVersion::V4 => self
+                        .sets
+                        .v4_sets
+                        .get(full_name.as_str())
+                        .map(|s| minijinja::value::Value::from_object(LazyIpSet(s.clone()))),
+                    IpVersion::V6 => self
+                        .sets
+                        .v6_sets
+                        .get(full_name.as_str())
+                        .map(|s| minijinja::value::Value::from_object(LazyIpSet(s.clone()))),
+                };
+
+                if let Some(value) = val {
+                    // Only yield if not empty (check using the Object trait we implemented)
+                    if value.is_true() {
+                        callback(ip_version, &full_name, &value)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 struct IpSets {
@@ -155,7 +205,7 @@ impl IpSets {
     {
         // Only trust direct entries fully
         let trusted_set = input.source.starts_with("direct:");
-        let target_set = target_map.entry(IStr::from(set_name)).or_default();
+        let set = Arc::make_mut(target_map.entry(IStr::from(set_name)).or_default());
 
         let mut added = 0;
         let mut invalid = 0;
@@ -169,7 +219,7 @@ impl IpSets {
         {
             if let Some(net) = parser(line_bytes) {
                 if likely(trusted_set || net.meets_min_prefix(input.min_prefix)) {
-                    if target_set.insert(net) {
+                    if set.insert(net) {
                         added += 1;
                     }
                 } else {
@@ -200,36 +250,6 @@ impl IpSets {
             IpVersion::V6 => {
                 Self::process_ips(&mut self.v6_sets, set_name, input, parse_v6_net_bytes);
             }
-        }
-    }
-
-    // Optimized for fewer allocations
-    fn get_formatted_generic<T>(map: &NetSets<T>, set_name: &str) -> Option<String>
-    where
-        T: std::fmt::Display,
-    {
-        use std::fmt::Write as _;
-        map.get(set_name).map(|nets| {
-            if nets.is_empty() {
-                return String::new();
-            }
-            // Heuristic pre-allocation: ~20 bytes per entry (IP + formatting)
-            let mut buf = String::with_capacity(nets.len() * 20);
-            for (i, net) in nets.iter().enumerate() {
-                if likely(i > 0) {
-                    buf.push_str(",\n\t\t");
-                }
-                // Write directly to buffer using std::fmt::Write
-                let _ = write!(buf, "{}", net);
-            }
-            buf
-        })
-    }
-
-    fn get_formatted(&self, version: IpVersion, set_name: &str) -> Option<String> {
-        match version {
-            IpVersion::V4 => Self::get_formatted_generic(&self.v4_sets, set_name),
-            IpVersion::V6 => Self::get_formatted_generic(&self.v6_sets, set_name),
         }
     }
 }
@@ -352,8 +372,16 @@ fn start_downloads(
     rx
 }
 
-fn process_local_files(urls: Vec<IStr>) -> impl Iterator<Item = DownloadResult> {
+// Slurp, improve in the future
+fn process_local_files<I, S>(urls: I) -> impl Iterator<Item = DownloadResult>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<IStr>,
+{
     urls.into_iter().map(|url| {
+        // Shadow to IStr
+        let url = Into::<IStr>::into(url);
+
         let content = url.strip_prefix("file://").map_or_else(
             || Err(anyhow::anyhow!("Not a file:// URL")),
             |path| std::fs::read(path).map_err(anyhow::Error::from),
@@ -361,6 +389,20 @@ fn process_local_files(urls: Vec<IStr>) -> impl Iterator<Item = DownloadResult> 
 
         DownloadResult { url, content }
     })
+}
+
+fn generate_country_urls<S: AsRef<str>>(
+    countries: &[String],
+    tmpl_urls: &[S],
+) -> impl Iterator<Item = IStr> {
+    countries
+        .iter()
+        .map(|country| country.to_lowercase())
+        .flat_map(|country_lower| {
+            tmpl_urls
+                .iter()
+                .map(move |tmpl| IStr::from(tmpl.as_ref().replace("{country}", &country_lower)))
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -429,19 +471,8 @@ fn generate_abuselist_urls<S: AsRef<str>>(entries: &[ListEntry], tmpl_urls: &[S]
     urls
 }
 
-fn generate_country_urls<S: AsRef<str>>(countries: &[String], tmpl_urls: &[S]) -> Vec<IStr> {
-    countries
-        .iter()
-        .map(|country| country.to_lowercase())
-        .flat_map(|country_lower| {
-            tmpl_urls
-                .iter()
-                .map(move |tmpl| IStr::from(tmpl.as_ref().replace("{country}", &country_lower)))
-        })
-        .collect()
-}
-
-fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
+// Change signature to accept a writer and return Result<()>
+fn render_nftable<W: std::io::Write>(context: &AppContext, sets: &IpSets, writer: W) -> Result<()> {
     let template_content =
         fs::read_to_string(&context.template).context("Failed to read template file")?;
 
@@ -449,47 +480,41 @@ fn generate_nftable(context: &AppContext, sets: &IpSets) -> Result<String> {
     jinja.set_trim_blocks(true);
     jinja.set_lstrip_blocks(true);
     jinja.add_template("zuul", &template_content)?;
+
     let template = jinja.get_template("zuul")?;
 
-    let mut set_data = HashMap::with_capacity(8);
+    let mut set_data = HashMap::new();
+    let processor = SetProcessor::new(&context.config, sets);
+
+    let mut populate = |_, name: &str, val: &minijinja::Value| {
+        set_data.insert(name.to_string(), val.clone());
+        Ok(())
+    };
+
+    processor.for_each_set(SetType::Static, &mut populate)?;
+    processor.for_each_set(SetType::Dynamic, &mut populate)?;
+
     let cfg = &context.config;
 
-    // Configured set names
-    let base_set_names = [
-        &cfg.set_names.whitelist,
-        &cfg.set_names.blacklist,
-        &cfg.set_names.abuselist,
-        &cfg.set_names.country,
-    ];
-
-    // ... with ip version appended
-    set_data.extend(cfg.net.get_active().flat_map(|ip_version| {
-        base_set_names.iter().map(move |base_name| {
-            let full_name = format!("{}_{}", base_name, ip_version);
-            let nets = sets
-                .get_formatted(ip_version, &full_name)
-                .unwrap_or_default();
-            (full_name, nets)
-        })
-    }));
-
-    // Render template with all context
+    // Stream directly to the writer
     use minijinja::context;
-
-    let rules = template.render(context! {
-        iifname => &cfg.iifname,
-        default_policy => &cfg.default_policy,
-        block_policy => &cfg.block_policy,
-        logging => &cfg.logging,
-        set_names => &cfg.set_names,
-        sets => set_data,
-        ip_versions => context! {
-            v4 => cfg.net.v4.enabled,
-            v6 => cfg.net.v6.enabled,
+    template.render_to_write(
+        context! {
+            iifname => &cfg.iifname,
+            default_policy => &cfg.default_policy,
+            block_policy => &cfg.block_policy,
+            logging => &cfg.logging,
+            set_names => &cfg.set_names,
+            sets => set_data,
+            ip_versions => context! {
+                v4 => cfg.net.v4.enabled,
+                v6 => cfg.net.v6.enabled,
+            },
         },
-    })?;
+        writer,
+    )?;
 
-    Ok(rules)
+    Ok(())
 }
 
 fn collect_ip_sets(context: &AppContext) -> IpSets {
@@ -579,11 +604,9 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
             }
 
             http_urls.extend(
-                generate_country_urls(countries, country_tmpl)
-                    .into_iter()
-                    .inspect(|url| {
-                        url_map.insert(url.clone(), (set_name.clone(), ip_version, None));
-                    }),
+                generate_country_urls(countries, country_tmpl).inspect(|url| {
+                    url_map.insert(url.clone(), (set_name.clone(), ip_version, None));
+                }),
             );
         }
     }
@@ -635,6 +658,103 @@ fn collect_ip_sets(context: &AppContext) -> IpSets {
     sets
 }
 
+fn calculate_totals(sets: &IpSets) -> (usize, usize) {
+    let total_v4: usize = sets
+        .v4_sets
+        .iter()
+        .inspect(|(name, set)| info!("Set {}: {} unique IPv4 networks", name, set.len()))
+        .map(|(_, set)| set.len())
+        .sum();
+
+    let total_v6: usize = sets
+        .v6_sets
+        .iter()
+        .inspect(|(name, set)| info!("Set {}: {} unique IPv6 networks", name, set.len()))
+        .map(|(_, set)| set.len())
+        .sum();
+    (total_v4, total_v6)
+}
+
+fn start(context: &AppContext) -> Result<()> {
+    info!("Starting zuul");
+    let sets = collect_ip_sets(context);
+
+    // Capture context
+    let generator =
+        |writer: &mut dyn Write| -> Result<()> { render_nftable(context, &sets, writer) };
+
+    if context.print_stdout {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        generator(&mut handle)?;
+    } else {
+        run_nft_stream(context.dry_run, generator)?;
+    }
+
+    Ok(())
+}
+
+fn stop() -> Result<()> {
+    info!("Stopping zuul");
+    run_nft_cli(&["delete", "table", "netdev", "blackhole"], false)?;
+    info!("Successfully deleted nftables table 'netdev blackhole'");
+
+    Ok(())
+}
+
+fn refresh(context: &AppContext) -> Result<()> {
+    info!("Reloading abuselist and country lists");
+
+    let sets = collect_ip_sets(context);
+    let cfg = &context.config;
+    let processor = SetProcessor::new(cfg, &sets);
+
+    // Capture context
+    let generator = |writer: &mut dyn Write| -> Result<()> {
+        for ip_version in cfg.net.get_active() {
+            writeln!(
+                writer,
+                "flush set netdev blackhole {}_{}",
+                cfg.set_names.abuselist, ip_version
+            )?;
+            writeln!(
+                writer,
+                "flush set netdev blackhole {}_{}",
+                cfg.set_names.country, ip_version
+            )?;
+        }
+
+        processor.for_each_set(SetType::Dynamic, |_, name, val| {
+            writeln!(
+                writer,
+                "add element netdev blackhole {} {{ {} }} ",
+                name, val
+            )?;
+
+            Ok(())
+        })?;
+
+        Ok(())
+    };
+
+    // Execute
+    if context.print_stdout {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        generator(&mut handle)?;
+    } else {
+        run_nft_stream(context.dry_run, generator)?;
+    }
+
+    let (total_v4, total_v6) = calculate_totals(&sets);
+    info!(
+        "Reloaded total entries IPv4: {} IPv6: {}",
+        total_v4, total_v6
+    );
+
+    Ok(())
+}
+
 fn run_nft_cli(args: &[&str], dry_run: bool) -> Result<Output> {
     if dry_run {
         debug!("Mocking nft command: nft {}", args.join(" "));
@@ -660,155 +780,52 @@ fn run_nft_cli(args: &[&str], dry_run: bool) -> Result<Output> {
     Ok(output)
 }
 
-fn run_nft_stdin(rules: &str, dry_run: bool) -> Result<Output> {
-    use std::process::Stdio;
-
+// Spawns `nft -f -` and executes the provided callback to write rules to its stdin.
+/// Handles broken pipes gracefully (ignoring them if caused by early nft exit)
+fn run_nft_stream<F>(dry_run: bool, write_op: F) -> Result<()>
+where
+    F: FnOnce(&mut dyn Write) -> Result<()>,
+{
     if dry_run {
         debug!("Mocking nft command: nft -f -");
-        let mock_status =
-            <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(0);
-        return Ok(Output {
-            status: mock_status,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        });
+        let mut sink = std::io::sink();
+        write_op(&mut sink)?;
+        return Ok(());
     }
-    info!("Executing nft command: nft -f -");
 
+    info!("Executing nft command: nft -f -");
     let mut child = Command::new("nft")
         .arg("-f")
         .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .context("Failed to spawn nft command")?;
 
-    let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-    stdin
-        .write_all(rules.as_bytes())
-        .context("Failed to write rules to nft stdin")?;
+    {
+        let stdin = child.stdin.as_mut().context("Failed to open stdin")?;
+        let mut writer = std::io::BufWriter::new(stdin);
 
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait on nft command")?;
+        if let Err(e) = write_op(&mut writer) {
+            // Check for BrokenPipe (nft closed connection early)
+            let is_broken_pipe = e.chain().any(|c| {
+                c.downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+            });
 
+            if !is_broken_pipe {
+                return Err(e);
+            }
+        }
+    }
+
+    let output = child.wait_with_output().context("Failed to wait on nft")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         error!("nft command failed: {}", stderr);
         return Err(anyhow::anyhow!("nft execution error: {stderr}"));
     }
-
-    Ok(output)
-}
-
-fn write_to_stdout(buf: &str) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    handle.write_all(buf.as_bytes())?;
-    Ok(())
-}
-
-fn calculate_totals(sets: &IpSets) -> (usize, usize) {
-    let total_v4: usize = sets
-        .v4_sets
-        .iter()
-        .inspect(|(name, set)| info!("Set {}: {} unique IPv4 networks", name, set.len()))
-        .map(|(_, set)| set.len())
-        .sum();
-
-    let total_v6: usize = sets
-        .v6_sets
-        .iter()
-        .inspect(|(name, set)| info!("Set {}: {} unique IPv6 networks", name, set.len()))
-        .map(|(_, set)| set.len())
-        .sum();
-    (total_v4, total_v6)
-}
-
-fn start(context: &AppContext) -> Result<()> {
-    info!("Starting zuul");
-    let sets = collect_ip_sets(context);
-    let rules = generate_nftable(context, &sets)?;
-
-    if context.print_stdout {
-        write_to_stdout(&rules)?;
-    }
-    run_nft_stdin(&rules, context.dry_run)?;
-
-    Ok(())
-}
-
-fn stop() -> Result<()> {
-    info!("Stopping zuul");
-    run_nft_cli(&["delete", "table", "netdev", "blackhole"], false)?;
-    info!("Successfully deleted nftables table 'netdev blackhole'");
-
-    Ok(())
-}
-
-fn refresh(context: &AppContext) -> Result<()> {
-    use std::fmt::Write as _;
-
-    info!("Reloading abuselist and country lists");
-
-    let mut commands = String::with_capacity(8192);
-    let cfg = &context.config;
-
-    for ip_version in cfg.net.get_active() {
-        let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
-        let country_set = format!("{}_{}", cfg.set_names.country, ip_version);
-
-        writeln!(commands, "flush set netdev blackhole {}", abuselist_set)?;
-        writeln!(commands, "flush set netdev blackhole {}", country_set)?;
-    }
-    let sets = collect_ip_sets(context);
-
-    for ip_version in cfg.net.get_active() {
-        let abuselist_set = format!("{}_{}", cfg.set_names.abuselist, ip_version);
-        let country_set = format!("{}_{}", cfg.set_names.country, ip_version);
-
-        let abuselist_elements = sets.get_formatted(ip_version, &abuselist_set);
-
-        if let Some(elements) = abuselist_elements
-            && !elements.is_empty()
-        {
-            writeln!(
-                commands,
-                "add element netdev blackhole {} {{ {} }}",
-                abuselist_set, elements
-            )?;
-        }
-
-        let country_elements = sets.get_formatted(ip_version, &country_set);
-
-        if let Some(elements) = country_elements
-            && !elements.is_empty()
-        {
-            writeln!(
-                commands,
-                "add element netdev blackhole {} {{ {} }}",
-                country_set, elements
-            )?;
-        }
-    }
-
-    if !commands.is_empty() {
-        if context.print_stdout {
-            write_to_stdout(&commands)?;
-        }
-        run_nft_stdin(&commands, context.dry_run)?;
-    }
-
-    let (total_v4, total_v6) = calculate_totals(&sets);
-    info!(
-        "Reloaded total entries IPv4: {} IPv6: {} total: {}",
-        total_v4,
-        total_v6,
-        total_v4 + total_v6
-    );
-
-    info!("Successfully reloaded ABUSELIST and COUNTRY_LIST sets");
 
     Ok(())
 }
@@ -984,11 +1001,6 @@ mod tests {
         }
     }
 
-    // Helper to build a NetSets<String> for formatting tests.
-    fn make_string_set_map() -> NetSets<String> {
-        NetSets::default()
-    }
-
     // Implement PrefixCheck for u32 in tests (stub implementation)
     impl cidr::PrefixCheck for u32 {
         #[inline]
@@ -1110,67 +1122,48 @@ mod tests {
         assert!(set.contains(&7));
     }
 
-    // Test for get_formatted_*
     #[test]
-    fn get_formatted_generic_returns_none_for_unknown_set() {
-        let map: NetSets<String> = make_string_set_map();
-        let out = IpSets::get_formatted_generic(&map, "missing");
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn get_formatted_generic_returns_empty_string_for_empty_set() {
-        let mut map: NetSets<String> = make_string_set_map();
-        // Create an empty set entry under "empty"
-        let _ = map.entry(IStr::from("empty")).or_default();
-        let out = IpSets::get_formatted_generic(&map, "empty").expect("entry should exist");
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn get_formatted_generic_formats_single_entry_without_separator() {
-        let mut map: NetSets<String> = make_string_set_map();
-        let set = map.entry(IStr::from("single")).or_default();
-        set.insert("10.0.0.0/8".to_owned());
-        let out = IpSets::get_formatted_generic(&map, "single").expect("entry should exist");
-        assert_eq!(out, "10.0.0.0/8");
-    }
-
-    #[test]
-    fn get_formatted_generic_formats_multiple_entries_with_separator() {
-        let mut map: NetSets<String> = make_string_set_map();
-        let set = map.entry(IStr::from("multi")).or_default();
-        // BTreeSet iteration order is sorted, so we can assert exact output.
+    fn test_lazy_ip_set_formatting_multiple() {
+        let mut set = BTreeSet::new();
+        // Insert strings (LazyIpSet is generic over T: Display)
         set.insert("10.0.0.0/8".to_owned());
         set.insert("192.168.0.0/16".to_owned());
-        let out = IpSets::get_formatted_generic(&map, "multi").expect("entry should exist");
+
+        let lazy = LazyIpSet(Arc::new(set));
+
+        // Verify formatting matches the template expectation
         let expected = "10.0.0.0/8,\n\t\t192.168.0.0/16";
-        assert_eq!(out, expected);
+        assert_eq!(lazy.to_string(), expected);
     }
 
     #[test]
-    fn get_formatted_dispatches_on_version() {
-        let mut sets = IpSets::new();
-        // Feed content through the real pipeline so the correct net types are used.
-        let v4_input = ProcessingInput {
-            source: "memory://v4",
-            content: b"10.0.0.0/8\n",
-            min_prefix: MIN_PREFIX_LEN,
-        };
-        let v6_input = ProcessingInput {
-            source: "memory://v6",
-            content: b"fd00::/24\n",
-            min_prefix: MIN_PREFIX_LEN,
-        };
-        sets.process_content(IpVersion::V4, "test", v4_input);
-        sets.process_content(IpVersion::V6, "test", v6_input);
-        let v4_str = sets
-            .get_formatted(IpVersion::V4, "test")
-            .expect("v4 set should exist");
-        let v6_str = sets
-            .get_formatted(IpVersion::V6, "test")
-            .expect("v6 set should exist");
-        assert_eq!(v4_str, "10.0.0.0/8");
-        assert_eq!(v6_str, "fd00::/24");
+    fn test_lazy_ip_set_formatting_single() {
+        let mut set = BTreeSet::new();
+        set.insert("10.0.0.0/8".to_owned());
+
+        let lazy = LazyIpSet(Arc::new(set));
+        assert_eq!(lazy.to_string(), "10.0.0.0/8");
+    }
+
+    #[test]
+    fn test_lazy_ip_set_formatting_empty() {
+        let set = BTreeSet::<String>::new();
+        let lazy = LazyIpSet(Arc::new(set));
+        assert_eq!(lazy.to_string(), "");
+    }
+
+    #[test]
+    fn test_lazy_ip_set_truthiness() {
+        use minijinja::value::Object;
+
+        // Case 1: Non-empty set should be "true"
+        let mut set = BTreeSet::new();
+        set.insert("item".to_owned());
+        let not_empty = Arc::new(LazyIpSet(Arc::new(set)));
+        assert!(Object::is_true(&not_empty));
+
+        // Case 2: Empty set should be "false"
+        let empty = Arc::new(LazyIpSet(Arc::new(BTreeSet::<String>::new())));
+        assert!(!Object::is_true(&empty));
     }
 }
