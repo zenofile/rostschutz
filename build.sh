@@ -52,11 +52,19 @@ main() {
             echo 'Installing dependencies...' && \
             apt-get update -qq && \
             apt-get install -y -qq pkg-config libssl-dev libcurl4-openssl-dev && \
+            rustup component add rust-src && \
             echo 'Switching to user $BUILD_USER for build...' && \
             exec runuser -u \"\${BUILD_USER}\" -- /bin/bash -c '
-                cargo -Z unstable-options -C /build build --release --features=static
+                cargo \
+                    -Z unstable-options \
+                    -Z build-std=std,panic_abort \
+                    -Z build-std-features=default \
+                    -C /build build \
+                    --profile=release-native \
+                    --target=\"\$(rustc --print host-tuple)\" \
+                    --features=static
             '
-        "; then
+        ";then
         log_info "Build completed successfully!"
     else
         log_error "Build failed."

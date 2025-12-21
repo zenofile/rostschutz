@@ -42,16 +42,16 @@ mod minijinja_impl {
     where
         T: fmt::Display + fmt::Debug + Send + Sync + 'static,
     {
-        // Override is_true so {% if sets.name %} works naturally.
-        // By default, Objects are always "true" unless they implement enumerator_len,
-        // which we don't. We want empty sets to be skipped in the template.
+        // Override is_true so {% if sets.name %} works naturally. By default,
+        // Objects are always "true" unless they implement enumerator_len, which
+        // we don't. We want empty sets to be skipped in the template.
         fn is_true(self: &Arc<Self>) -> bool {
             !self.data.is_empty()
         }
 
-        // Override render to force usage of our Display impl.
-        // Without this, Minijinja might treat this as an opaque struct/map
-        // and print a debug representation (like `{}`) instead of our formatted list.
+        // Override render to force usage of our Display impl. Without this,
+        // Minijinja might treat this as an opaque struct/map and print a debug
+        // representation (like `{}`) instead of our formatted list.
         fn render(self: &Arc<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             fmt::Display::fmt(self, f)
         }
@@ -83,7 +83,8 @@ impl<'a> RenderContext<'a> {
     }
 
     /// Iterates over all active sets of the given type.
-    /// The callback receives: (IP Version, Set Name, `LazyIpSet` Object)
+    /// The callback receives: (IP Version, Set Name, `LazyIpSet`
+    /// Object)
     fn for_each_set<F>(&self, set_type: SetType, mut callback: F) -> Result<()>
     where
         F: FnMut(IpVersion, &str, &minijinja::Value) -> Result<()>,
@@ -140,8 +141,8 @@ pub fn render_template(
     jinja.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
     jinja.set_trim_blocks(true);
     jinja.set_lstrip_blocks(true);
-    jinja.add_template("zuul", &template_content)?;
-    let template = jinja.get_template("zuul")?;
+    jinja.add_template("rostschutz", &template_content)?;
+    let template = jinja.get_template("rostschutz")?;
 
     let processor = RenderContext::new(&context.config, sets);
     let mut all_sets = HashMap::new();

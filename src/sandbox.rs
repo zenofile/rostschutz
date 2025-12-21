@@ -16,7 +16,8 @@ pub enum Status {
     Full,
     /// The sandbox is partially active (some features may be missing).
     Partial,
-    /// The sandbox is not enforcing any rules (e.g., unsupported kernel).
+    /// The sandbox is not enforcing any rules (e.g., unsupported
+    /// kernel).
     None,
 }
 
@@ -35,7 +36,8 @@ impl std::fmt::Display for Status {
 ///
 /// # Arguments
 ///
-/// * `user_read_paths` - An iterator of file paths to allow read-only access to.
+/// * `user_read_paths` - An iterator of file paths to allow read-only
+///   access to.
 pub fn harden<I, P>(user_read_paths: I) -> Result<Status>
 where
     I: IntoIterator<Item = P>,

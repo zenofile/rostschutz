@@ -34,8 +34,7 @@ impl std::ops::Deref for IStr {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        // &self.0 is &Arc<str>.
-        // We need to return &str.
+        // &self.0 is &Arc<str>, we need to return &str.
         // Use explicit dereference or as_ref() if implicit coercion fails.
         &self.0
     }

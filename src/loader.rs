@@ -151,7 +151,7 @@ fn download_url(timeout: u64, job: DownloadJob) -> DownloadResult {
     let result = (|| -> Result<()> {
         let mut easy = curl::easy::Easy::new();
         static USER_AGENT: &str = concat!(
-            "Mozilla/5.0 (compatible; zuul/",
+            "Mozilla/5.0 (compatible; rostschutz/",
             env!("CARGO_PKG_VERSION"),
             ")"
         );
@@ -310,8 +310,8 @@ pub fn collect_ip_sets(context: &AppContext) -> SetInventory {
                 let set_name = IStr::from(format!("{}_{}", base_name, ip_version));
 
                 // Parse entries (separating inline Nets from URLs)
-                // We pass the default_trust here so the parser can resolve the final boolean for
-                // each URL
+                // We pass the default_trust here so the parser can resolve the final
+                // boolean for each URL
                 let (parsed_urls, raw_content) =
                     parse_list_entries(entries, asn_tmpl, default_trust);
 
@@ -376,9 +376,9 @@ pub fn collect_ip_sets(context: &AppContext) -> SetInventory {
             } else {
                 http_urls.extend(
                     generate_country_urls(countries, country_tmpl).inspect(|url| {
-                        // Country lists are typically external sources, so we default to untrusted
-                        // (false) They usually contain valid CIDRs, but
-                        // prefix checking is safer.
+                        // Country lists are typically external sources, so we default to
+                        // untrusted (false) They usually contain valid
+                        // CIDRs, but prefix checking is safer.
                         url_map.insert(
                             url.clone(),
                             SetContext {
@@ -499,7 +499,8 @@ mod tests {
         let http_entry = urls.iter().find(|u| matches!(u, UrlEntry::Http { url, trusted: false, .. } if url.contains("example.com/list")));
         assert!(http_entry.is_some(), "Standard URL should be preserved");
 
-        // Check Raw Content (Always Trusted implicitly by being returned in the string)
+        // Check Raw Content (Always Trusted implicitly by being returned in the
+        // string)
         assert!(
             raw.contains("10.0.0.0/8"),
             "Raw IP should be in the string buffer"

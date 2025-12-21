@@ -8,8 +8,9 @@ use tracing::{debug, error, info};
 
 use crate::AppContext;
 
-// Spawns `nft -f -` and executes the provided callback to write rules to its stdin.
-/// Handles broken pipes gracefully (ignoring them if caused by early nft exit)
+/// Spawns `nft -f -` and executes the provided callback to write rules
+/// to its stdin. Handles broken pipes gracefully (ignoring them if
+/// caused by early nft exit)
 pub fn run_nft_stream<F>(dry_run: bool, write_op: F) -> Result<()>
 where
     F: FnOnce(&mut dyn std::io::Write) -> Result<()>,

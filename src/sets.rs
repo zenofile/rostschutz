@@ -457,9 +457,9 @@ mod tests {
     #[test]
     fn process_ips_discards_lines_exceeding_buffer_limit() {
         let mut map = NetSets::<u32>::default();
-        // 1. Create a "Line Too Long": 4096 bytes of 'a's (fills the buffer completely without a
-        //    newline). Followed by "1\n" (the "tail" of the long line). Total line length: 4096 + 2
-        //    = 4098 bytes.
+        // Create a "Line Too Long": 4096 bytes of 'a's (fills the buffer
+        // completely without a newline). Followed by "1\n" (the "tail" of the
+        // long line). Total line length: 4096 + 2 = 4098 bytes.
         let mut content = vec![b'a'; 4096];
         content.extend_from_slice(b"1\n");
         // 2. Add a valid second line "2\n"
@@ -474,7 +474,8 @@ mod tests {
         let set = map.get("long_test").expect("set should be created");
 
         // "1" must be DISCARDED because it is part of the long line.
-        // "2" must be ACCEPTED because the buffer was cleared and recovery was successful.
+        // "2" must be ACCEPTED because the buffer was cleared and recovery was
+        // successful.
         assert_eq!(set.len(), 1);
         assert!(set.contains(&2));
         assert!(!set.contains(&1));

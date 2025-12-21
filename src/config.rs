@@ -356,7 +356,7 @@ impl Config {
 
         if config.iifname.is_empty() {
             if let Some(def) = get_default_interface() {
-                info!("Determined default interface: {}", def);
+                info!("Determined default route interface: {}", def);
                 config.iifname.push(def);
             } else {
                 warn!("No interface specified and no default route found. Using fallback 'eth0'");
